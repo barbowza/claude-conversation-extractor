@@ -436,6 +436,11 @@ class ClaudeConversationExtractor:
             f.write("# Claude Conversation Log\n\n")
             # Trailing two spaces = markdown line break, so each field gets its own line.
             for label, value in self._header_fields(session_id, info, conversation, date_str):
+                if label == "Session name":
+                    # Use a longer backtick fence if the name itself contains backticks.
+                    fence = "`" * (max((len(r) for r in re.findall(r"`+", value)), default=0) + 1)
+                    pad = " " if value.startswith("`") or value.endswith("`") else ""
+                    value = f"{fence}{pad}{value}{pad}{fence}"
                 f.write(f"{label}: {value}  \n")
             f.write("\n---\n\n")
 
@@ -535,7 +540,9 @@ class ClaudeConversationExtractor:
             )
 
         header_html = "\n".join(
-            f"            <p>{esc(label)}: {esc(value)}</p>"
+            f"            <p>{esc(label)}: <code>{esc(value)}</code></p>"
+            if label == "Session name"
+            else f"            <p>{esc(label)}: {esc(value)}</p>"
             for label, value in self._header_fields(session_id, info, conversation, date_str)
         )
         page_title = esc(info["title"] or f"Claude Conversation - {session_id[:8]}")
