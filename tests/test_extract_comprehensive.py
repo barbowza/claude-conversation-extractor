@@ -225,7 +225,7 @@ class TestClaudeConversationExtractorComprehensive(unittest.TestCase):
         )
 
         mock_extract.assert_called_once_with(
-            mock_sessions, [0, 1, 2], format="markdown", detailed=False
+            mock_sessions, [0, 1, 2], format="markdown", detailed=False, thinking=False, timestamps=False
         )
 
     def test_extract_all(self):
@@ -239,7 +239,21 @@ class TestClaudeConversationExtractorComprehensive(unittest.TestCase):
         )
 
         mock_extract.assert_called_once_with(
-            mock_sessions, list(range(5)), format="json", detailed=True
+            mock_sessions, list(range(5)), format="json", detailed=True, thinking=False, timestamps=False
+        )
+
+    def test_extract_with_thinking_and_timestamps(self):
+        """--thinking and --timestamps are opt-in flags passed through to extraction"""
+        mock_sessions = [Path(self.temp_dir) / f"session{i}.jsonl" for i in range(3)]
+
+        mock_extract = self._run_main(
+            ["--all", "--thinking", "--timestamps"],
+            sessions=mock_sessions,
+            extract_result=(3, 3),
+        )
+
+        mock_extract.assert_called_once_with(
+            mock_sessions, list(range(3)), format="markdown", detailed=False, thinking=True, timestamps=True
         )
 
     def test_main_list_command(self):
@@ -261,7 +275,7 @@ class TestClaudeConversationExtractorComprehensive(unittest.TestCase):
             ["--extract", "1"], sessions=sessions, extract_result=(1, 1)
         )
         mock_extract.assert_called_once_with(
-            sessions, [0], format="markdown", detailed=False
+            sessions, [0], format="markdown", detailed=False, thinking=False, timestamps=False
         )
 
     def test_main_extract_multiple_comma(self):
@@ -289,7 +303,7 @@ class TestClaudeConversationExtractorComprehensive(unittest.TestCase):
             ["--recent", "5"], sessions=sessions, extract_result=(5, 5)
         )
         mock_extract.assert_called_once_with(
-            sessions, [0, 1, 2, 3, 4], format="markdown", detailed=False
+            sessions, [0, 1, 2, 3, 4], format="markdown", detailed=False, thinking=False, timestamps=False
         )
 
     def test_main_all(self):
@@ -299,7 +313,7 @@ class TestClaudeConversationExtractorComprehensive(unittest.TestCase):
             ["--all"], sessions=sessions, extract_result=(4, 4)
         )
         mock_extract.assert_called_once_with(
-            sessions, [0, 1, 2, 3], format="markdown", detailed=False
+            sessions, [0, 1, 2, 3], format="markdown", detailed=False, thinking=False, timestamps=False
         )
 
     def test_main_interactive(self):

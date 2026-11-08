@@ -102,7 +102,9 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
       <h2 id="title"></h2>
       <div class="meta" id="meta"></div>
       <div class="toolbar">
-        <label><input type="checkbox" id="detailed"> Show tool calls</label>
+        <label><input type="checkbox" id="detailed"> Tool calls &amp; results</label>
+        <label><input type="checkbox" id="thinking"> Thinking</label>
+        <label><input type="checkbox" id="timestamps"> Timestamps</label>
         <label><input type="checkbox" id="promptsOnly"> Your prompts only</label>
         <input type="search" id="find" placeholder="Highlight in conversation" style="width:200px">
         <span style="flex:1"></span>
@@ -229,8 +231,12 @@ function renderList() {
     </button>`).join("");
 }
 
+// Opt-in content toggles, sent to the server as ?detailed=1&thinking=1&timestamps=1.
+function optionParams() {
+  return ["detailed", "thinking", "timestamps"].filter((id) => $(id).checked).map((id) => `&${id}=1`).join("");
+}
 function exportUrl(fmt) {
-  return `/api/export?path=${encodeURIComponent(current.path)}&format=${fmt}${$("detailed").checked ? "&detailed=1" : ""}`;
+  return `/api/export?path=${encodeURIComponent(current.path)}&format=${fmt}${optionParams()}`;
 }
 
 async function openSession(path, push = true) {
@@ -259,7 +265,7 @@ async function loadMessages() {
   const path = current.path;
   $("conv").innerHTML = '<div class="empty">Loading conversation…</div>';
   try {
-    const data = await getJSON(`/api/session?path=${encodeURIComponent(path)}${$("detailed").checked ? "&detailed=1" : ""}`);
+    const data = await getJSON(`/api/session?path=${encodeURIComponent(path)}${optionParams()}`);
     if (!current || current.path !== path) return;   // user moved on
     messages = data.messages;
     renderMessages();
@@ -272,12 +278,13 @@ async function loadMessages() {
 const ROLE = {user: "You", assistant: "Claude", tool_use: "Tool call", tool_result: "Tool result", system: "System"};
 function renderMessages() {
   const only = $("promptsOnly").checked;
+  const showTime = $("timestamps").checked;
   const rows = only ? messages.filter((m) => m.role === "user") : messages;
   if (!rows.length) { $("conv").innerHTML = '<div class="empty">No readable messages in this session.</div>'; return; }
   $("conv").innerHTML = rows.map((m, i) => {
     const long = m.content.length > 2500 || m.content.split("\n").length > 40;
     return `<div class="msg ${esc(m.role)}${long ? " collapsed" : ""}">
-      <div class="msg-h"><b>${ROLE[m.role] || esc(m.role)}</b><span>${esc(fmtDate(m.timestamp))}</span></div>
+      <div class="msg-h"><b>${ROLE[m.role] || esc(m.role)}</b><span>${showTime ? esc(fmtDate(m.timestamp)) : ""}</span></div>
       <div class="body">${render(m.content)}</div>
       ${long ? '<button class="btn more" type="button">Show all</button>' : ""}
     </div>`;
@@ -315,7 +322,13 @@ $("conv").addEventListener("click", (e) => {
 $("q").addEventListener("input", renderList);
 ["subagents", "archived", "sort"].forEach((id) => $(id).addEventListener("change", renderList));
 $("refresh").addEventListener("click", loadSessions);
-$("detailed").addEventListener("change", () => { if (current) { openSession(current.path, false); } });
+// Tool calls and thinking change what the server returns; timestamps only change rendering and export links.
+["detailed", "thinking"].forEach((id) => $(id).addEventListener("change", () => { if (current) openSession(current.path, false); }));
+$("timestamps").addEventListener("change", () => {
+  if (!current) return;
+  $("exMd").href = exportUrl("markdown"); $("exHtml").href = exportUrl("html"); $("exJson").href = exportUrl("json");
+  renderMessages();
+});
 $("promptsOnly").addEventListener("change", renderMessages);
 let findTimer;
 $("find").addEventListener("input", () => { clearTimeout(findTimer); findTimer = setTimeout(renderMessages, 250); });

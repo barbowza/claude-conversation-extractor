@@ -206,12 +206,15 @@ class ClaudeConversationExtractor:
                 sessions.append(jsonl_file)
         return sorted(sessions, key=lambda x: x.stat().st_mtime, reverse=True)
 
-    def extract_conversation(self, jsonl_path: Path, detailed: bool = False) -> List[Dict[str, str]]:
+    def extract_conversation(
+        self, jsonl_path: Path, detailed: bool = False, thinking: bool = False
+    ) -> List[Dict[str, str]]:
         """Extract conversation messages from a JSONL file.
-        
+
         Args:
             jsonl_path: Path to the JSONL file
-            detailed: If True, include tool use, MCP responses, and system messages
+            detailed: If True, include tool use, tool results, MCP responses and system messages
+            thinking: If True, include Claude's extended thinking where the log stored its text
         """
         conversation = []
 
@@ -251,7 +254,9 @@ class ClaudeConversationExtractor:
                             msg = entry["message"]
                             if isinstance(msg, dict) and msg.get("role") == "assistant":
                                 content = msg.get("content", [])
-                                text = self._extract_text_content(content, detailed=detailed)
+                                text = self._extract_text_content(
+                                    content, detailed=detailed, thinking=thinking
+                                )
 
                                 if text and text.strip():
                                     conversation.append(
@@ -390,12 +395,13 @@ class ClaudeConversationExtractor:
             "timestamp": attachment.get("timestamp", "") or entry.get("timestamp", ""),
         }
 
-    def _extract_text_content(self, content, detailed: bool = False) -> str:
+    def _extract_text_content(self, content, detailed: bool = False, thinking: bool = False) -> str:
         """Extract text from various content formats Claude uses.
-        
+
         Args:
             content: The content to extract from
             detailed: If True, include tool use blocks and other metadata
+            thinking: If True, include extended thinking blocks that stored text
         """
         if content is None:
             return ""
@@ -408,10 +414,9 @@ class ClaudeConversationExtractor:
                 if isinstance(item, dict):
                     if item.get("type") == "text":
                         text_parts.append(item.get("text", ""))
-                    elif item.get("type") == "thinking":
-                        # Extended thinking is the assistant's own words and
-                        # was being dropped on the floor. Where the block
-                        # holds no text there is nothing to recover.
+                    elif thinking and item.get("type") == "thinking":
+                        # Extended thinking is opt-in (--thinking). Where the
+                        # block holds no text there is nothing to recover.
                         thought = item.get("thinking", "")
                         if thought and thought.strip():
                             text_parts.append(f"\n🧠 Thinking:\n{thought}\n")
@@ -521,11 +526,21 @@ class ClaudeConversationExtractor:
             print(f"❌ Error displaying conversation: {e}")
             input("\nPress Enter to continue...")
 
+    @staticmethod
+    def _message_time(timestamp: str) -> str:
+        """A message's timestamp as local 'YYYY-MM-DD HH:MM:SS', or "" if missing or unparseable."""
+        dt = _parse_timestamp(timestamp or "")
+        return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
     @_handle_write_errors
     def save_as_markdown(
-        self, conversation: List[Dict[str, str]], session_id: str
+        self, conversation: List[Dict[str, str]], session_id: str, timestamps: bool = False
     ) -> Optional[Path]:
-        """Save conversation as clean markdown file."""
+        """Save conversation as clean markdown file.
+
+        Args:
+            timestamps: If True, append each message's local time to its heading
+        """
         if not conversation:
             return None
 
@@ -563,24 +578,26 @@ class ClaudeConversationExtractor:
             for msg in conversation:
                 role = msg["role"]
                 content = msg["content"]
-                
+                when = self._message_time(msg.get("timestamp", "")) if timestamps else ""
+                stamp = f" [{when}]" if when else ""
+
                 if role == "user":
-                    f.write("## 👤 User\n\n")
+                    f.write(f"## 👤 User{stamp}\n\n")
                     f.write(f"{content}\n\n")
                 elif role == "assistant":
-                    f.write("## 🤖 Claude\n\n")
+                    f.write(f"## 🤖 Claude{stamp}\n\n")
                     f.write(f"{content}\n\n")
                 elif role == "tool_use":
-                    f.write("### 🔧 Tool Use\n\n")
+                    f.write(f"### 🔧 Tool Use{stamp}\n\n")
                     f.write(f"{content}\n\n")
                 elif role == "tool_result":
-                    f.write("### 📤 Tool Result\n\n")
+                    f.write(f"### 📤 Tool Result{stamp}\n\n")
                     f.write(f"{content}\n\n")
                 elif role == "system":
-                    f.write("### ℹ️ System\n\n")
+                    f.write(f"### ℹ️ System{stamp}\n\n")
                     f.write(f"{content}\n\n")
                 else:
-                    f.write(f"## {role}\n\n")
+                    f.write(f"## {role}{stamp}\n\n")
                     f.write(f"{content}\n\n")
                 f.write("---\n\n")
 
@@ -627,9 +644,13 @@ class ClaudeConversationExtractor:
     
     @_handle_write_errors
     def save_as_html(
-        self, conversation: List[Dict[str, str]], session_id: str
+        self, conversation: List[Dict[str, str]], session_id: str, timestamps: bool = False
     ) -> Optional[Path]:
-        """Save conversation as HTML file with syntax highlighting."""
+        """Save conversation as HTML file with syntax highlighting.
+
+        Args:
+            timestamps: If True, show each message's local time next to its role
+        """
         if not conversation:
             return None
 
@@ -762,6 +783,12 @@ class ClaudeConversationExtractor:
             display: flex;
             align-items: center;
         }}
+        .ts {{
+            font-weight: normal;
+            font-size: 0.85em;
+            color: var(--muted);
+            margin-left: 8px;
+        }}
         .content {{
             white-space: pre-wrap;
             word-wrap: break-word;
@@ -810,9 +837,11 @@ class ClaudeConversationExtractor:
                     "tool_result": "📤 Tool Result",
                     "system": "ℹ️ System"
                 }.get(role, role)
-                
+                when = self._message_time(msg.get("timestamp", "")) if timestamps else ""
+                ts_html = f'<span class="ts">{when}</span>' if when else ""
+
                 f.write(f'    <div class="message {role}">\n')
-                f.write(f'        <div class="role">{role_display}</div>\n')
+                f.write(f'        <div class="role">{role_display}{ts_html}</div>\n')
                 f.write(f'        <div class="content">{content}</div>\n')
                 f.write(f'    </div>\n')
             
@@ -843,7 +872,11 @@ class ClaudeConversationExtractor:
         return output_path
 
     def save_conversation(
-        self, conversation: List[Dict[str, str]], session_id: str, format: str = "markdown"
+        self,
+        conversation: List[Dict[str, str]],
+        session_id: str,
+        format: str = "markdown",
+        timestamps: bool = False,
     ) -> Optional[Path]:
         """Save conversation in the specified format.
         
@@ -851,13 +884,15 @@ class ClaudeConversationExtractor:
             conversation: The conversation data
             session_id: Session identifier
             format: Output format ('markdown', 'json', 'html')
+            timestamps: Show per-message times in markdown/html (JSON always
+                carries each message's raw timestamp)
         """
         if format == "markdown":
-            return self.save_as_markdown(conversation, session_id)
+            return self.save_as_markdown(conversation, session_id, timestamps=timestamps)
         elif format == "json":
             return self.save_as_json(conversation, session_id)
         elif format == "html":
-            return self.save_as_html(conversation, session_id)
+            return self.save_as_html(conversation, session_id, timestamps=timestamps)
         else:
             print(f"❌ Unsupported format: {format}")
             return None
@@ -986,16 +1021,19 @@ class ClaudeConversationExtractor:
         return sessions[:limit]
 
     def extract_multiple(
-        self, sessions: List[Path], indices: List[int], 
-        format: str = "markdown", detailed: bool = False
+        self, sessions: List[Path], indices: List[int],
+        format: str = "markdown", detailed: bool = False,
+        thinking: bool = False, timestamps: bool = False,
     ) -> Tuple[int, int]:
         """Extract multiple sessions by index.
-        
+
         Args:
             sessions: List of session paths
             indices: Indices to extract
             format: Output format ('markdown', 'json', 'html')
-            detailed: If True, include tool use and system messages
+            detailed: If True, include tool use, tool results and system messages
+            thinking: If True, include Claude's extended thinking
+            timestamps: If True, show per-message times in markdown/html
         """
         success = 0
         total = len(indices)
@@ -1003,9 +1041,13 @@ class ClaudeConversationExtractor:
         for idx in indices:
             if 0 <= idx < len(sessions):
                 session_path = sessions[idx]
-                conversation = self.extract_conversation(session_path, detailed=detailed)
+                conversation = self.extract_conversation(
+                    session_path, detailed=detailed, thinking=thinking
+                )
                 if conversation:
-                    output_path = self.save_conversation(conversation, session_path.stem, format=format)
+                    output_path = self.save_conversation(
+                        conversation, session_path.stem, format=format, timestamps=timestamps
+                    )
                     if not output_path:
                         print(f"❌ Could not save session {idx + 1}")
                         continue
@@ -1107,7 +1149,17 @@ Examples:
     parser.add_argument(
         "--detailed",
         action="store_true",
-        help="Include tool use, MCP responses, and system messages in export"
+        help="Include tool calls, tool results, MCP responses, and system messages in export"
+    )
+    parser.add_argument(
+        "--thinking",
+        action="store_true",
+        help="Include Claude's extended thinking (only where the log stored its text)"
+    )
+    parser.add_argument(
+        "--timestamps",
+        action="store_true",
+        help="Show each message's time in markdown and HTML exports"
     )
 
     args = parser.parse_args()
@@ -1208,15 +1260,14 @@ Examples:
                         # Offer to extract after viewing
                         extract_choice = input("\n📤 Extract this conversation? (y/N): ").strip().lower()
                         if extract_choice == 'y':
-                            conversation = extractor.extract_conversation(selected_path, detailed=args.detailed)
+                            conversation = extractor.extract_conversation(
+                                selected_path, detailed=args.detailed, thinking=args.thinking
+                            )
                             if conversation:
-                                session_id = selected_path.stem
-                                if args.format == "json":
-                                    output = extractor.save_as_json(conversation, session_id)
-                                elif args.format == "html":
-                                    output = extractor.save_as_html(conversation, session_id)
-                                else:
-                                    output = extractor.save_as_markdown(conversation, session_id)
+                                output = extractor.save_conversation(
+                                    conversation, selected_path.stem,
+                                    format=args.format, timestamps=args.timestamps,
+                                )
                                 if output:
                                     print(f"✅ Saved: {output.name}")
             except (EOFError, KeyboardInterrupt):
@@ -1258,7 +1309,8 @@ Examples:
             if args.detailed:
                 print("📋 Including detailed tool use and system messages")
             success, total = extractor.extract_multiple(
-                sessions, indices, format=args.format, detailed=args.detailed
+                sessions, indices, format=args.format, detailed=args.detailed,
+                thinking=args.thinking, timestamps=args.timestamps,
             )
             print(f"\n✅ Successfully extracted {success}/{total} sessions")
 
@@ -1271,7 +1323,8 @@ Examples:
 
         indices = list(range(limit))
         success, total = extractor.extract_multiple(
-            sessions, indices, format=args.format, detailed=args.detailed
+            sessions, indices, format=args.format, detailed=args.detailed,
+            thinking=args.thinking, timestamps=args.timestamps,
         )
         print(f"\n✅ Successfully extracted {success}/{total} sessions")
 
@@ -1283,7 +1336,8 @@ Examples:
 
         indices = list(range(len(sessions)))
         success, total = extractor.extract_multiple(
-            sessions, indices, format=args.format, detailed=args.detailed
+            sessions, indices, format=args.format, detailed=args.detailed,
+            thinking=args.thinking, timestamps=args.timestamps,
         )
         print(f"\n✅ Successfully extracted {success}/{total} sessions")
 

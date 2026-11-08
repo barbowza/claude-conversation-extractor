@@ -75,6 +75,17 @@ def _scan_meta(path: Path) -> dict:
             if isinstance(ts, str) and ts:
                 meta["first"] = meta["first"] or ts
                 meta["last"] = ts
+            if kind == "attachment":
+                # Messages typed while Claude was still working are stored as
+                # queued_command attachments; count the ones a human typed.
+                att = entry.get("attachment")
+                if (
+                    isinstance(att, dict)
+                    and att.get("type") == "queued_command"
+                    and isinstance(att.get("origin"), dict)
+                    and att["origin"].get("kind") == "human"
+                ):
+                    meta["user"] += 1
             if kind in ("user", "assistant"):
                 msg = entry.get("message")
                 if isinstance(msg, dict):
@@ -187,6 +198,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         detailed = q.get("detailed") == "1"
+        thinking = q.get("thinking") == "1"
+        timestamps = q.get("timestamps") == "1"
 
         if url.path == "/":
             return self._send(
@@ -209,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             path = resolve_session(q.get("path"))
             if not path:
                 return self._error(HTTPStatus.NOT_FOUND, "Session not found")
-            messages = _extractor.extract_conversation(path, detailed=detailed)
+            messages = _extractor.extract_conversation(path, detailed=detailed, thinking=thinking)
             return self._json({"path": q["path"], "messages": messages})
 
         if url.path == "/api/export":
@@ -219,8 +232,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(HTTPStatus.NOT_FOUND, "Session not found")
             if fmt not in EXPORT_FORMATS:
                 return self._error(HTTPStatus.BAD_REQUEST, "Unknown format")
-            conversation = _extractor.extract_conversation(path, detailed=detailed)
-            out = _extractor.save_conversation(conversation, path.stem, fmt)
+            conversation = _extractor.extract_conversation(path, detailed=detailed, thinking=thinking)
+            out = _extractor.save_conversation(conversation, path.stem, fmt, timestamps=timestamps)
             if not out:
                 return self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "Conversation is empty")
             body = Path(out).read_bytes()
