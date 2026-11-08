@@ -9,9 +9,43 @@ readable markdown files.
 
 import argparse
 import json
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+def desktop_app_sessions() -> Dict[str, dict]:
+    """Map CLI session id -> {title, archived} from the Claude desktop app, if installed."""
+    found: Dict[str, dict] = {}
+    roots = []
+    if os.environ.get("LOCALAPPDATA"):
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "Claude-Data")
+    roots.append(Path.home() / "Library" / "Application Support" / "Claude-Data")
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for f in root.glob("*/claude-code-sessions/**/local_*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            cli_id = data.get("cliSessionId") if isinstance(data, dict) else None
+            if cli_id:
+                found[cli_id] = {
+                    "title": data.get("title") or "",
+                    "archived": bool(data.get("isArchived")),
+                }
+    return found
+
+
+def safe_filename_part(text: str, max_len: int = 60) -> str:
+    """Turn a session title into a string that is safe inside a filename on any OS."""
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", text or "")
+    text = re.sub(r"\s+", "-", text.strip())
+    text = re.sub(r"-{2,}", "-", text).strip("-. ")
+    return text[:max_len].rstrip("-. ")
 
 
 class ClaudeConversationExtractor:
@@ -51,6 +85,37 @@ class ClaudeConversationExtractor:
                 self.output_dir.mkdir(exist_ok=True)
 
         print(f"📁 Saving logs to: {self.output_dir}")
+
+    def get_session_title(self, session_id: str) -> str:
+        """Session name: the desktop app's title, else the last custom title in the JSONL."""
+        app = desktop_app_sessions().get(session_id)
+        if app and app.get("title"):
+            return app["title"]
+        title = ""
+        for path in self.claude_dir.rglob(f"{session_id}.jsonl"):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if '"custom-title"' not in line and '"summary"' not in line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except ValueError:
+                            continue
+                        if entry.get("type") == "custom-title" and entry.get("customTitle"):
+                            title = entry["customTitle"]
+                        elif entry.get("type") == "summary" and entry.get("summary") and not title:
+                            title = entry["summary"]
+            except OSError:
+                continue
+            break
+        return title
+
+    def _output_filename(self, session_id: str, date_str: str, ext: str) -> str:
+        """Export filename, prefixed with the session's name when it has one."""
+        base = f"claude-conversation-{date_str}-{session_id[:8]}{ext}"
+        prefix = safe_filename_part(self.get_session_title(session_id))
+        return f"{prefix}_{base}" if prefix else base
 
     def find_sessions(self, project_path: Optional[str] = None) -> List[Path]:
         """Find all JSONL session files, sorted by most recent first."""
@@ -306,7 +371,7 @@ class ClaudeConversationExtractor:
             date_str = datetime.now().strftime("%Y-%m-%d")
             time_str = ""
 
-        filename = f"claude-conversation-{date_str}-{session_id[:8]}.md"
+        filename = self._output_filename(session_id, date_str, ".md")
         output_path = self.output_dir / filename
 
         with open(output_path, "w", encoding="utf-8") as f:
@@ -361,7 +426,7 @@ class ClaudeConversationExtractor:
         else:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
-        filename = f"claude-conversation-{date_str}-{session_id[:8]}.json"
+        filename = self._output_filename(session_id, date_str, ".json")
         output_path = self.output_dir / filename
 
         # Create JSON structure
@@ -398,7 +463,7 @@ class ClaudeConversationExtractor:
             date_str = datetime.now().strftime("%Y-%m-%d")
             time_str = ""
 
-        filename = f"claude-conversation-{date_str}-{session_id[:8]}.html"
+        filename = self._output_filename(session_id, date_str, ".html")
         output_path = self.output_dir / filename
 
         # HTML template with modern styling
@@ -409,36 +474,70 @@ class ClaudeConversationExtractor:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Claude Conversation - {session_id[:8]}</title>
     <style>
+        :root {{
+            color-scheme: light;
+            --bg: #f5f5f5; --text: #333; --heading: #2c3e50; --muted: #666;
+            --card: #ffffff; --shadow: rgba(0,0,0,0.1); --code: #f4f4f4;
+            --tool-use-bg: #fffbf0; --tool-result-bg: #fff5f5; --system-bg: #f8f9fa;
+        }}
+        :root[data-theme="dark"] {{
+            color-scheme: dark;
+            --bg: #161514; --text: #e6e4e0; --heading: #f2f0ec; --muted: #9b978f;
+            --card: #1f1e1c; --shadow: rgba(0,0,0,0.5); --code: #2a2825;
+            --tool-use-bg: #2a2418; --tool-result-bg: #2b1c1c; --system-bg: #232323;
+        }}
+        @media (prefers-color-scheme: dark) {{
+            :root:not([data-theme="light"]) {{
+                color-scheme: dark;
+                --bg: #161514; --text: #e6e4e0; --heading: #f2f0ec; --muted: #9b978f;
+                --card: #1f1e1c; --shadow: rgba(0,0,0,0.5); --code: #2a2825;
+                --tool-use-bg: #2a2418; --tool-result-bg: #2b1c1c; --system-bg: #232323;
+            }}
+        }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             line-height: 1.6;
-            color: #333;
+            color: var(--text);
             max-width: 900px;
             margin: 0 auto;
             padding: 20px;
-            background: #f5f5f5;
+            background: var(--bg);
         }}
         .header {{
-            background: white;
+            background: var(--card);
             padding: 20px;
             border-radius: 8px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px var(--shadow);
+            position: relative;
+        }}
+        .theme-toggle {{
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            font: inherit;
+            font-size: 0.85em;
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid var(--muted);
+            background: transparent;
+            color: var(--text);
+            cursor: pointer;
         }}
         h1 {{
-            color: #2c3e50;
+            color: var(--heading);
             margin: 0 0 10px 0;
         }}
         .metadata {{
-            color: #666;
+            color: var(--muted);
             font-size: 0.9em;
         }}
         .message {{
-            background: white;
+            background: var(--card);
             padding: 15px 20px;
             margin-bottom: 15px;
             border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px var(--shadow);
         }}
         .user {{
             border-left: 4px solid #3498db;
@@ -448,15 +547,15 @@ class ClaudeConversationExtractor:
         }}
         .tool_use {{
             border-left: 4px solid #f39c12;
-            background: #fffbf0;
+            background: var(--tool-use-bg);
         }}
         .tool_result {{
             border-left: 4px solid #e74c3c;
-            background: #fff5f5;
+            background: var(--tool-result-bg);
         }}
         .system {{
             border-left: 4px solid #95a5a6;
-            background: #f8f9fa;
+            background: var(--system-bg);
         }}
         .role {{
             font-weight: bold;
@@ -469,13 +568,13 @@ class ClaudeConversationExtractor:
             word-wrap: break-word;
         }}
         pre {{
-            background: #f4f4f4;
+            background: var(--code);
             padding: 10px;
             border-radius: 4px;
             overflow-x: auto;
         }}
         code {{
-            background: #f4f4f4;
+            background: var(--code);
             padding: 2px 4px;
             border-radius: 3px;
             font-family: 'Courier New', monospace;
@@ -484,6 +583,7 @@ class ClaudeConversationExtractor:
 </head>
 <body>
     <div class="header">
+        <button class="theme-toggle" id="theme-toggle" type="button">Theme: auto</button>
         <h1>Claude Conversation Log</h1>
         <div class="metadata">
             <p>Session ID: {session_id}</p>
@@ -518,7 +618,29 @@ class ClaudeConversationExtractor:
                 f.write(f'        <div class="content">{content}</div>\n')
                 f.write(f'    </div>\n')
             
-            f.write("\n</body>\n</html>")
+            # Theme toggle: auto (follows the OS) -> dark -> light, remembered per browser.
+            f.write(
+                "\n<script>\n"
+                "(function () {\n"
+                "  var modes = ['auto', 'dark', 'light'], key = 'claude-export-theme';\n"
+                "  var btn = document.getElementById('theme-toggle');\n"
+                "  function apply(m) {\n"
+                "    if (m === 'auto') document.documentElement.removeAttribute('data-theme');\n"
+                "    else document.documentElement.setAttribute('data-theme', m);\n"
+                "    btn.textContent = 'Theme: ' + m;\n"
+                "  }\n"
+                "  var mode = 'auto';\n"
+                "  try { mode = localStorage.getItem(key) || 'auto'; } catch (e) {}\n"
+                "  apply(mode);\n"
+                "  btn.addEventListener('click', function () {\n"
+                "    mode = modes[(modes.indexOf(mode) + 1) % modes.length];\n"
+                "    apply(mode);\n"
+                "    try { localStorage.setItem(key, mode); } catch (e) {}\n"
+                "  });\n"
+                "})();\n"
+                "</script>\n"
+            )
+            f.write("</body>\n</html>")
 
         return output_path
 

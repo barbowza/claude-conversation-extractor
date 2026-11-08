@@ -11,7 +11,6 @@ Run:  claude-web [--port 8765] [--no-browser]
 
 import argparse
 import json
-import os
 import shutil
 import tempfile
 import threading
@@ -25,10 +24,10 @@ from urllib.parse import parse_qs, quote, urlparse
 
 try:
     from .claude_web_page import PAGE
-    from .extract_claude_logs import ClaudeConversationExtractor
+    from .extract_claude_logs import ClaudeConversationExtractor, desktop_app_sessions
 except ImportError:
     from claude_web_page import PAGE
-    from extract_claude_logs import ClaudeConversationExtractor
+    from extract_claude_logs import ClaudeConversationExtractor, desktop_app_sessions
 
 PROJECTS_DIR = (Path.home() / ".claude" / "projects").resolve()
 EXPORT_FORMATS = {
@@ -42,30 +41,6 @@ _EXPORT_DIR = Path(tempfile.mkdtemp(prefix="claude-web-"))
 _extractor = ClaudeConversationExtractor(output_dir=_EXPORT_DIR)
 _meta_cache: Dict[str, Tuple[Tuple[float, int], dict]] = {}
 _cache_lock = threading.Lock()
-
-
-def _desktop_app_sessions() -> Dict[str, dict]:
-    """Map CLI session id -> {title, archived} from the Claude desktop app, if present."""
-    found: Dict[str, dict] = {}
-    roots = []
-    if os.environ.get("LOCALAPPDATA"):
-        roots.append(Path(os.environ["LOCALAPPDATA"]) / "Claude-Data")
-    roots.append(Path.home() / "Library" / "Application Support" / "Claude-Data")
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for f in root.glob("*/claude-code-sessions/**/local_*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            cli_id = data.get("cliSessionId")
-            if cli_id:
-                found[cli_id] = {
-                    "title": data.get("title") or "",
-                    "archived": bool(data.get("isArchived")),
-                }
-    return found
 
 
 def _scan_meta(path: Path) -> dict:
@@ -151,7 +126,7 @@ def _session_info(path: Path, desktop: Dict[str, dict]) -> dict:
 
 
 def list_sessions() -> list:
-    desktop = _desktop_app_sessions()
+    desktop = desktop_app_sessions()
     out = []
     if PROJECTS_DIR.is_dir():
         for p in PROJECTS_DIR.rglob("*.jsonl"):
@@ -250,8 +225,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "Conversation is empty")
             body = Path(out).read_bytes()
             Path(out).unlink(missing_ok=True)
-            ctype, ext = EXPORT_FORMATS[fmt]
-            name = f"claude-{path.stem[:8]}{ext}"
+            ctype, _ = EXPORT_FORMATS[fmt]
+            name = Path(out).name  # same name the CLI would write
             return self._send(
                 HTTPStatus.OK,
                 body,
