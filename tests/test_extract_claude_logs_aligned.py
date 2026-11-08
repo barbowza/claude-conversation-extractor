@@ -458,6 +458,8 @@ class TestMainFunction(unittest.TestCase):
                             [0, 1, 2, 3, 4],
                             format="markdown",
                             detailed=False,
+                            thinking=False,
+                            timestamps=False,
                         )
 
     def test_main_output_dir(self):

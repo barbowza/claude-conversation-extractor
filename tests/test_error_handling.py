@@ -173,7 +173,7 @@ class TestMainFunctionErrorCases(unittest.TestCase):
 
                         # Should handle empty list gracefully
                         mock_extract.assert_called_once_with(
-                            [], [], format="markdown", detailed=False
+                            [], [], format="markdown", detailed=False, thinking=False, timestamps=False
                         )
                         print_calls = [str(call) for call in mock_print.call_args_list]
                         self.assertTrue(
