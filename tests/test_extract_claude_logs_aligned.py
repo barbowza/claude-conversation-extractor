@@ -15,7 +15,8 @@ from unittest.mock import Mock, patch
 sys.path.append(str(Path(__file__).parent.parent))
 
 # Local imports after sys.path modification
-from extract_claude_logs import ClaudeConversationExtractor, main  # noqa: E402
+from extract_claude_logs import (ClaudeConversationExtractor,  # noqa: E402
+                                 launch_interactive, main)
 
 
 class TestClaudeConversationExtractor(unittest.TestCase):
@@ -98,11 +99,12 @@ class TestClaudeConversationExtractor(unittest.TestCase):
         (project1 / "chat_1.jsonl").write_text("{}")
         (project2 / "chat_2.jsonl").write_text("{}")
 
+        # Patch home before building the extractor: claude_dir is set in __init__
         with patch("pathlib.Path.home", return_value=Path(self.temp_dir)):
-            # Find only in project1
-            sessions = self.extractor.find_sessions("project1")
-            self.assertEqual(len(sessions), 1)
-            self.assertIn("project1", str(sessions[0]))
+            test_extractor = ClaudeConversationExtractor(self.temp_dir)
+        # Find only in project1
+        sessions = test_extractor.find_sessions("project1")
+        self.assertEqual(sessions, [project1 / "chat_1.jsonl"])
 
     # Test extract_conversation
     def test_extract_conversation_valid_jsonl(self):
@@ -175,9 +177,7 @@ class TestClaudeConversationExtractor(unittest.TestCase):
         """Test extracting text from empty content"""
         self.assertEqual(self.extractor._extract_text_content([]), "")
         self.assertEqual(self.extractor._extract_text_content(""), "")
-        self.assertEqual(
-            self.extractor._extract_text_content(None), "None"
-        )  # Actual behavior
+        self.assertEqual(self.extractor._extract_text_content(None), "")
 
     def test_extract_text_content_other_types(self):
         """Test extracting text from other types"""
@@ -201,7 +201,7 @@ class TestClaudeConversationExtractor(unittest.TestCase):
         output_path = self.extractor.save_as_markdown(conversation, "test_session")
 
         self.assertTrue(output_path.exists())
-        content = output_path.read_text()
+        content = output_path.read_text(encoding="utf-8")
         self.assertIn("Hello", content)
         self.assertIn("Hi!", content)
         self.assertIn("👤 User", content)
@@ -221,7 +221,7 @@ class TestClaudeConversationExtractor(unittest.TestCase):
 
         output_path = self.extractor.save_as_markdown(conversation, "no_time")
         self.assertTrue(output_path.exists())
-        content = output_path.read_text()
+        content = output_path.read_text(encoding="utf-8")
         # Should use current date
         self.assertIn(datetime.now().strftime("%Y-%m-%d"), content)
 
@@ -234,7 +234,7 @@ class TestClaudeConversationExtractor(unittest.TestCase):
         output_path = self.extractor.save_as_markdown(conversation, "bad_time")
         self.assertTrue(output_path.exists())
         # Should handle gracefully and use current date
-        content = output_path.read_text()
+        content = output_path.read_text(encoding="utf-8")
         self.assertIn(datetime.now().strftime("%Y-%m-%d"), content)
 
     # Test list_recent_sessions
@@ -331,12 +331,36 @@ class TestClaudeConversationExtractor(unittest.TestCase):
 class TestMainFunction(unittest.TestCase):
     """Test the main() function and command-line interface"""
 
-    def test_main_no_args_launches_interactive(self):
-        """Test that no arguments launches interactive mode"""
+    def test_main_no_args_lists_sessions(self):
+        """Test that main() with no arguments defaults to listing sessions.
+
+        (The no-argument interactive launch lives in launch_interactive(),
+        the console-script entry point; see test_launch_interactive_no_args.)
+        """
         with patch("sys.argv", ["extract_claude_logs.py"]):
-            with patch("extract_claude_logs.launch_interactive") as mock_launch:
-                main()
-                mock_launch.assert_called_once()
+            with patch.dict("sys.modules", {"interactive_ui": Mock()}) as modules:
+                with patch.object(
+                    ClaudeConversationExtractor, "list_recent_sessions", return_value=[]
+                ) as mock_list:
+                    with patch("builtins.print"):
+                        main()
+                mock_list.assert_called_once_with(None)
+                modules["interactive_ui"].main.assert_not_called()
+
+    def test_launch_interactive_no_args(self):
+        """Test the console entry point with no arguments launches the UI"""
+        mock_ui = Mock()
+        with patch("sys.argv", ["claude-extract"]):
+            with patch.dict("sys.modules", {"interactive_ui": mock_ui}):
+                launch_interactive()
+        mock_ui.main.assert_called_once()
+
+    def test_launch_interactive_with_args_runs_cli(self):
+        """Test the console entry point delegates to main() when given flags"""
+        with patch("sys.argv", ["claude-extract", "--list"]):
+            with patch("extract_claude_logs.main") as mock_main:
+                launch_interactive()
+        mock_main.assert_called_once()
 
     def test_main_list_command(self):
         """Test --list command"""
@@ -356,7 +380,9 @@ class TestMainFunction(unittest.TestCase):
                 ClaudeConversationExtractor, "find_sessions", return_value=mock_sessions
             ):
                 with patch.object(
-                    ClaudeConversationExtractor, "extract_multiple"
+                    ClaudeConversationExtractor,
+                    "extract_multiple",
+                    return_value=(1, 1),
                 ) as mock_extract:
                     with patch.object(
                         ClaudeConversationExtractor, "list_recent_sessions"
@@ -376,7 +402,9 @@ class TestMainFunction(unittest.TestCase):
                 ClaudeConversationExtractor, "find_sessions", return_value=mock_sessions
             ):
                 with patch.object(
-                    ClaudeConversationExtractor, "extract_multiple"
+                    ClaudeConversationExtractor,
+                    "extract_multiple",
+                    return_value=(1, 1),
                 ) as mock_extract:
                     with patch.object(
                         ClaudeConversationExtractor, "list_recent_sessions"
@@ -395,7 +423,9 @@ class TestMainFunction(unittest.TestCase):
                 ClaudeConversationExtractor, "find_sessions", return_value=mock_sessions
             ):
                 with patch.object(
-                    ClaudeConversationExtractor, "extract_multiple"
+                    ClaudeConversationExtractor,
+                    "extract_multiple",
+                    return_value=(1, 1),
                 ) as mock_extract:
                     with patch.object(
                         ClaudeConversationExtractor, "list_recent_sessions"
@@ -414,15 +444,21 @@ class TestMainFunction(unittest.TestCase):
                 ClaudeConversationExtractor, "find_sessions", return_value=mock_sessions
             ):
                 with patch.object(
-                    ClaudeConversationExtractor, "extract_multiple"
+                    ClaudeConversationExtractor,
+                    "extract_multiple",
+                    return_value=(1, 1),
                 ) as mock_extract:
                     with patch.object(
                         ClaudeConversationExtractor, "list_recent_sessions"
                     ):
                         main()
-                        # Should extract all sessions
-                        args = mock_extract.call_args[0]
-                        self.assertEqual(args[1], [0, 1, 2, 3, 4])
+                        # Should extract all sessions in the default format
+                        mock_extract.assert_called_once_with(
+                            mock_sessions,
+                            [0, 1, 2, 3, 4],
+                            format="markdown",
+                            detailed=False,
+                        )
 
     def test_main_output_dir(self):
         """Test --output flag"""
@@ -439,34 +475,41 @@ class TestMainFunction(unittest.TestCase):
     def test_main_interactive_flag(self):
         """Test --interactive flag"""
         with patch("sys.argv", ["extract_claude_logs.py", "--interactive"]):
-            with patch("extract_claude_logs.launch_interactive") as mock_launch:
+            mock_ui = Mock()
+            with patch.dict("sys.modules", {"interactive_ui": mock_ui}):
                 main()
-                mock_launch.assert_called_once()
+            mock_ui.main.assert_called_once()
 
     def test_main_search(self):
         """Test --search command"""
         with patch("sys.argv", ["extract_claude_logs.py", "--search", "test query"]):
-            # Import at function level to avoid circular import
-            with patch(
-                "extract_claude_logs.search_conversations"
-            ) as mock_search_module:
-                mock_searcher = Mock()
-                mock_search_module.ConversationSearcher.return_value = mock_searcher
-                mock_searcher.search.return_value = []
+            # main() imports ConversationSearcher lazily, so stub the module
+            mock_searcher = Mock()
+            mock_searcher.search.return_value = []
+            fake_module = Mock(ConversationSearcher=Mock(return_value=mock_searcher))
 
-                with patch("builtins.print"):
-                    main()
-                    mock_searcher.search.assert_called_once()
+            with patch.dict("sys.modules", {"search_conversations": fake_module}):
+                with patch("builtins.input") as mock_input:
+                    with patch("builtins.print"):
+                        main()
+            mock_searcher.search.assert_called_once()
+            self.assertEqual(mock_searcher.search.call_args[1]["query"], "test query")
+            # No results: nothing to view, so no prompt
+            mock_input.assert_not_called()
 
     def test_main_invalid_extract_indices(self):
-        """Test --extract with invalid indices"""
+        """Test --extract with only invalid indices reports them and extracts nothing"""
         with patch("sys.argv", ["extract_claude_logs.py", "--extract", "abc"]):
-            with patch("builtins.print") as mock_print:
-                with patch("sys.exit") as mock_exit:
+            with patch.object(
+                ClaudeConversationExtractor, "extract_multiple"
+            ) as mock_extract:
+                with patch("builtins.print") as mock_print:
                     main()
-                    mock_exit.assert_called_once()
-                    print_calls = [str(call) for call in mock_print.call_args_list]
-                    self.assertTrue(any("Invalid" in str(call) for call in print_calls))
+            mock_extract.assert_not_called()
+            print_calls = [str(call) for call in mock_print.call_args_list]
+            self.assertTrue(
+                any("Invalid session number: abc" in call for call in print_calls)
+            )
 
 
 if __name__ == "__main__":

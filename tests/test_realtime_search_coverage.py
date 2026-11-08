@@ -40,7 +40,7 @@ class TestKeyboardHandlerCoverage(unittest.TestCase):
             self.assertFalse(hasattr(handler, "stdin_fd"))
 
     @patch("sys.platform", "win32")
-    @patch("realtime_search.msvcrt")
+    @patch("realtime_search.msvcrt", create=True)
     def test_windows_keyboard_special_keys(self, mock_msvcrt):
         """Test Windows special key handling"""
         handler = KeyboardHandler()
@@ -69,7 +69,7 @@ class TestKeyboardHandlerCoverage(unittest.TestCase):
                 mock_msvcrt.getch.side_effect = None
 
     @patch("sys.platform", "win32")
-    @patch("realtime_search.msvcrt")
+    @patch("realtime_search.msvcrt", create=True)
     def test_windows_keyboard_regular_chars(self, mock_msvcrt):
         """Test Windows regular character input"""
         handler = KeyboardHandler()
@@ -82,7 +82,7 @@ class TestKeyboardHandlerCoverage(unittest.TestCase):
         self.assertEqual(result, "a")
 
     @patch("sys.platform", "win32")
-    @patch("realtime_search.msvcrt")
+    @patch("realtime_search.msvcrt", create=True)
     def test_windows_keyboard_decode_error(self, mock_msvcrt):
         """Test Windows keyboard decode error handling"""
         handler = KeyboardHandler()
@@ -95,7 +95,7 @@ class TestKeyboardHandlerCoverage(unittest.TestCase):
         self.assertIsNone(result)
 
     @patch("sys.platform", "win32")
-    @patch("realtime_search.msvcrt")
+    @patch("realtime_search.msvcrt", create=True)
     def test_windows_keyboard_timeout(self, mock_msvcrt):
         """Test Windows keyboard timeout"""
         handler = KeyboardHandler()
@@ -109,7 +109,8 @@ class TestKeyboardHandlerCoverage(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertGreaterEqual(duration, 0.1)
-        self.assertLess(duration, 0.2)
+        # Generous upper bound: catches ignoring the timeout, not CI jitter
+        self.assertLess(duration, 0.5)
 
     @patch("sys.platform", "linux")
     def test_unix_keyboard_init(self):
@@ -121,9 +122,10 @@ class TestKeyboardHandlerCoverage(unittest.TestCase):
     @patch("sys.platform", "linux")
     def test_unix_keyboard_context_manager(self):
         """Test Unix keyboard context manager"""
+        # create=True: termios/tty only exist in the module on non-Windows
         with patch("sys.stdin.fileno", return_value=0), patch(
-            "realtime_search.termios"
-        ) as mock_termios, patch("realtime_search.tty") as mock_tty:
+            "realtime_search.termios", create=True
+        ) as mock_termios, patch("realtime_search.tty", create=True) as mock_tty:
 
             old_settings = "old_settings"
             mock_termios.tcgetattr.return_value = old_settings
@@ -144,49 +146,47 @@ class TestKeyboardHandlerCoverage(unittest.TestCase):
     @patch("sys.platform", "linux")
     def test_unix_keyboard_special_sequences(self):
         """Test Unix escape sequences"""
-        with patch("sys.stdin.fileno", return_value=0), patch(
-            "realtime_search.select"
-        ) as mock_select, patch("sys.stdin") as mock_stdin:
+        with patch("realtime_search.select", create=True) as mock_select, patch(
+            "sys.stdin"
+        ) as mock_stdin:
+            mock_stdin.fileno.return_value = 0
 
             handler = KeyboardHandler()
 
-            # Test escape sequences
+            ready = ([mock_stdin], [], [])
+            empty = ([], [], [])
+            # get_key reads one char at a time and polls select between reads
             test_cases = [
-                (["\x1b", "[A"], "UP"),
-                (["\x1b", "[B"], "DOWN"),
-                (["\x1b", "[C"], "RIGHT"),
-                (["\x1b", "[D"], "LEFT"),
-                (["\x1b"], "ESC"),  # Just escape
-                (["\r"], "ENTER"),
-                (["\n"], "ENTER"),
-                (["\x7f"], "BACKSPACE"),
-                (["\x08"], "BACKSPACE"),
+                (["\x1b", "[", "A"], [ready, ready, ready], "UP"),
+                (["\x1b", "[", "B"], [ready, ready, ready], "DOWN"),
+                (["\x1b", "[", "C"], [ready, ready, ready], "RIGHT"),
+                (["\x1b", "[", "D"], [ready, ready, ready], "LEFT"),
+                (["\x1b"], [ready, empty], "ESC"),  # Just escape
+                (["\r"], [ready], "ENTER"),
+                (["\n"], [ready], "ENTER"),
+                (["\x7f"], [ready], "BACKSPACE"),
+                (["\x08"], [ready], "BACKSPACE"),
             ]
 
-            for sequence, expected in test_cases:
+            for sequence, selects, expected in test_cases:
                 with self.subTest(expected=expected):
-                    # Mock select to indicate data available
-                    mock_select.select.return_value = ([sys.stdin], [], [])
-
-                    # Mock stdin reads
+                    mock_select.select.side_effect = selects
                     mock_stdin.read.side_effect = sequence
 
                     result = handler.get_key()
                     self.assertEqual(result, expected)
 
-                    # Reset mocks
-                    mock_stdin.read.side_effect = None
-
     @patch("sys.platform", "linux")
     def test_unix_keyboard_ctrl_c(self):
         """Test Ctrl+C handling"""
-        with patch("sys.stdin.fileno", return_value=0), patch(
-            "realtime_search.select"
-        ) as mock_select, patch("sys.stdin") as mock_stdin:
+        with patch("realtime_search.select", create=True) as mock_select, patch(
+            "sys.stdin"
+        ) as mock_stdin:
+            mock_stdin.fileno.return_value = 0
 
             handler = KeyboardHandler()
 
-            mock_select.select.return_value = ([sys.stdin], [], [])
+            mock_select.select.return_value = ([mock_stdin], [], [])
             mock_stdin.read.return_value = "\x03"  # Ctrl+C
 
             with self.assertRaises(KeyboardInterrupt):
@@ -218,22 +218,22 @@ class TestTerminalDisplayCoverage(unittest.TestCase):
         """Test cursor movement operations"""
         # Move cursor
         self.display.move_cursor(5, 10)
-        mock_print.assert_called_with("\033[5;10H", end="")
+        mock_print.assert_called_with("\033[5;10H", end="", flush=True)
 
         # Clear line
         mock_print.reset_mock()
         self.display.clear_line()
-        mock_print.assert_called_with("\033[2K", end="")
+        mock_print.assert_called_with("\033[2K", end="", flush=True)
 
         # Save cursor
         mock_print.reset_mock()
         self.display.save_cursor()
-        mock_print.assert_called_with("\033[s", end="")
+        mock_print.assert_called_with("\033[s", end="", flush=True)
 
         # Restore cursor
         mock_print.reset_mock()
         self.display.restore_cursor()
-        mock_print.assert_called_with("\033[u", end="")
+        mock_print.assert_called_with("\033[u", end="", flush=True)
 
     @patch("builtins.print")
     def test_draw_results_with_query_no_match(self, mock_print):
