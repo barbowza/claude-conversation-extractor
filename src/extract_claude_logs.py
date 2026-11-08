@@ -40,6 +40,16 @@ def desktop_app_sessions() -> Dict[str, dict]:
     return found
 
 
+def _parse_timestamp(ts: str) -> Optional[datetime]:
+    """ISO timestamp from a Claude JSONL entry -> local tz-aware datetime, or None."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return None
+
+
 def safe_filename_part(text: str, max_len: int = 60) -> str:
     """Turn a session title into a string that is safe inside a filename on any OS."""
     text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", text or "")
@@ -86,36 +96,83 @@ class ClaudeConversationExtractor:
 
         print(f"📁 Saving logs to: {self.output_dir}")
 
-    def get_session_title(self, session_id: str) -> str:
-        """Session name: the desktop app's title, else the last custom title in the JSONL."""
-        app = desktop_app_sessions().get(session_id)
-        if app and app.get("title"):
-            return app["title"]
-        title = ""
+    def get_session_info(self, session_id: str) -> Dict[str, Optional[datetime]]:
+        """Name and created / last-updated times (local, tz-aware) for a session.
+
+        The name is the desktop app's title, else the last custom title in the
+        JSONL. Times come from the first and last timestamps in the JSONL, with
+        the file's modification time as a fallback for the last update.
+        Missing values are "" (title) or None (times).
+        """
+        info: Dict = {"title": "", "created": None, "updated": None}
         for path in self.claude_dir.rglob(f"{session_id}.jsonl"):
+            first_ts = last_ts = ""
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     for line in f:
-                        if '"custom-title"' not in line and '"summary"' not in line:
-                            continue
                         try:
                             entry = json.loads(line)
                         except ValueError:
                             continue
+                        if not isinstance(entry, dict):
+                            continue
+                        ts = entry.get("timestamp")
+                        if isinstance(ts, str) and ts:
+                            first_ts = first_ts or ts
+                            last_ts = ts
                         if entry.get("type") == "custom-title" and entry.get("customTitle"):
-                            title = entry["customTitle"]
-                        elif entry.get("type") == "summary" and entry.get("summary") and not title:
-                            title = entry["summary"]
+                            info["title"] = entry["customTitle"]
+                        elif entry.get("type") == "summary" and entry.get("summary") and not info["title"]:
+                            info["title"] = entry["summary"]
+                info["created"] = _parse_timestamp(first_ts)
+                info["updated"] = _parse_timestamp(last_ts) or datetime.fromtimestamp(
+                    path.stat().st_mtime
+                ).astimezone()
             except OSError:
                 continue
             break
-        return title
+        app = desktop_app_sessions().get(session_id)
+        if app and app.get("title"):
+            info["title"] = app["title"]
+        return info
 
-    def _output_filename(self, session_id: str, date_str: str, ext: str) -> str:
-        """Export filename, prefixed with the session's name when it has one."""
-        base = f"claude-conversation-{date_str}-{session_id[:8]}{ext}"
-        prefix = safe_filename_part(self.get_session_title(session_id))
-        return f"{prefix}_{base}" if prefix else base
+    def get_session_title(self, session_id: str) -> str:
+        """Session name, or "" when it has none."""
+        return self.get_session_info(session_id)["title"]
+
+    @staticmethod
+    def _header_fields(
+        session_id: str, info: Dict, conversation: List[Dict[str, str]], date_str: str
+    ) -> List[Tuple[str, str]]:
+        """(label, value) pairs for the top of an export; missing values are skipped.
+
+        Created / last updated fall back to the conversation's own timestamps when
+        the session file can't be found, and to a plain Date line if there are none.
+        """
+        stamps = [_parse_timestamp(m.get("timestamp", "")) for m in conversation]
+        stamps = [s for s in stamps if s]
+        created = info.get("created") or (stamps[0] if stamps else None)
+        updated = info.get("updated") or (stamps[-1] if stamps else None)
+
+        fields = []
+        if info.get("title"):
+            fields.append(("Session name", info["title"]))
+        fields.append(("Session ID", session_id))
+        if created:
+            fields.append(("Created", created.strftime("%Y-%m-%d %H:%M:%S")))
+        if updated:
+            fields.append(("Last updated", updated.strftime("%Y-%m-%d %H:%M:%S")))
+        if not created and not updated:
+            fields.append(("Date", date_str))
+        return fields
+
+    @staticmethod
+    def _output_filename(session_id: str, date_str: str, ext: str, title: str = "") -> str:
+        """Export filename: <session-name>-<date>-<id>, or the original name when untitled."""
+        prefix = safe_filename_part(title)
+        if prefix:
+            return f"{prefix}-{date_str}-{session_id[:8]}{ext}"
+        return f"claude-conversation-{date_str}-{session_id[:8]}{ext}"
 
     def find_sessions(self, project_path: Optional[str] = None) -> List[Path]:
         """Find all JSONL session files, sorted by most recent first."""
@@ -371,16 +428,16 @@ class ClaudeConversationExtractor:
             date_str = datetime.now().strftime("%Y-%m-%d")
             time_str = ""
 
-        filename = self._output_filename(session_id, date_str, ".md")
+        info = self.get_session_info(session_id)
+        filename = self._output_filename(session_id, date_str, ".md", info["title"])
         output_path = self.output_dir / filename
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("# Claude Conversation Log\n\n")
-            f.write(f"Session ID: {session_id}\n")
-            f.write(f"Date: {date_str}")
-            if time_str:
-                f.write(f" {time_str}")
-            f.write("\n\n---\n\n")
+            # Trailing two spaces = markdown line break, so each field gets its own line.
+            for label, value in self._header_fields(session_id, info, conversation, date_str):
+                f.write(f"{label}: {value}  \n")
+            f.write("\n---\n\n")
 
             for msg in conversation:
                 role = msg["role"]
@@ -426,12 +483,16 @@ class ClaudeConversationExtractor:
         else:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
-        filename = self._output_filename(session_id, date_str, ".json")
+        info = self.get_session_info(session_id)
+        filename = self._output_filename(session_id, date_str, ".json", info["title"])
         output_path = self.output_dir / filename
 
         # Create JSON structure
         output = {
+            "session_name": info["title"] or None,
             "session_id": session_id,
+            "created": info["created"].isoformat() if info["created"] else None,
+            "last_updated": info["updated"].isoformat() if info["updated"] else None,
             "date": date_str,
             "message_count": len(conversation),
             "messages": conversation
@@ -463,8 +524,21 @@ class ClaudeConversationExtractor:
             date_str = datetime.now().strftime("%Y-%m-%d")
             time_str = ""
 
-        filename = self._output_filename(session_id, date_str, ".html")
+        info = self.get_session_info(session_id)
+        filename = self._output_filename(session_id, date_str, ".html", info["title"])
         output_path = self.output_dir / filename
+
+        def esc(text: str) -> str:
+            return (
+                str(text).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;")
+            )
+
+        header_html = "\n".join(
+            f"            <p>{esc(label)}: {esc(value)}</p>"
+            for label, value in self._header_fields(session_id, info, conversation, date_str)
+        )
+        page_title = esc(info["title"] or f"Claude Conversation - {session_id[:8]}")
 
         # HTML template with modern styling
         html_content = f"""<!DOCTYPE html>
@@ -472,7 +546,7 @@ class ClaudeConversationExtractor:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Conversation - {session_id[:8]}</title>
+    <title>{page_title}</title>
     <style>
         :root {{
             color-scheme: light;
@@ -586,8 +660,7 @@ class ClaudeConversationExtractor:
         <button class="theme-toggle" id="theme-toggle" type="button">Theme: auto</button>
         <h1>Claude Conversation Log</h1>
         <div class="metadata">
-            <p>Session ID: {session_id}</p>
-            <p>Date: {date_str} {time_str}</p>
+{header_html}
             <p>Messages: {len(conversation)}</p>
         </div>
     </div>
