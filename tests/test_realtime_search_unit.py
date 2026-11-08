@@ -255,9 +255,10 @@ class TestCreateSmartSearcher(unittest.TestCase):
 
         # Should have results from multiple modes
         self.assertGreater(len(results), 1)
-        paths = [str(r.file_path) for r in results]
-        self.assertIn("/exact/test", paths)
-        self.assertIn("/smart/test", paths)
+        # Compare Path objects so the check is separator-agnostic
+        paths = [r.file_path for r in results]
+        self.assertIn(Path("/exact/test"), paths)
+        self.assertIn(Path("/smart/test"), paths)
 
     def test_smart_search_deduplication(self):
         """Test that smart search deduplicates results"""
@@ -319,8 +320,8 @@ class TestCreateSmartSearcher(unittest.TestCase):
         self.assertIn("semantic", called_modes)
 
         # Should include semantic results
-        paths = [str(r.file_path) for r in results]
-        self.assertIn("/semantic/result", paths)
+        paths = [r.file_path for r in results]
+        self.assertIn(Path("/semantic/result"), paths)
 
     def test_smart_search_max_results(self):
         """Test that smart search respects max_results"""

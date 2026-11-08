@@ -56,48 +56,52 @@ class TestKeyboardHandlerComprehensive(unittest.TestCase):
     @patch("sys.platform", "darwin")
     def test_unix_keyboard_special_keys(self):
         """Test Unix keyboard handler with all special keys"""
-        with patch("realtime_search.termios"), patch("realtime_search.tty"), patch(
-            "realtime_search.select"
-        ) as mock_select, patch("sys.stdin") as mock_stdin:
+        # create=True: termios/tty/select are only imported on non-Windows,
+        # so inject fakes there to exercise the Unix code path everywhere.
+        with patch("realtime_search.termios", create=True), patch(
+            "realtime_search.tty", create=True
+        ), patch("realtime_search.select", create=True) as mock_select, patch(
+            "sys.stdin"
+        ) as mock_stdin:
 
             handler = KeyboardHandler()
 
-            # Test arrow keys
+            ready = ([True], [], [])
+            empty = ([], [], [])
+            # (select results in call order, chars read from stdin, expected key)
             test_cases = [
-                ([True], ["\x1b", "[", "A"], "UP"),
-                ([True], ["\x1b", "[", "B"], "DOWN"),
-                ([True], ["\x1b", "[", "C"], "RIGHT"),
-                ([True], ["\x1b", "[", "D"], "LEFT"),
-                ([True], ["\x1b"], "ESC"),  # ESC alone
-                ([True], ["\r"], "ENTER"),
-                ([True], ["\n"], "ENTER"),
-                ([True], ["\x7f"], "BACKSPACE"),
-                ([True], ["\x08"], "BACKSPACE"),
-                ([True], ["a"], "a"),  # Regular character
+                ([ready, ready, ready], ["\x1b", "[", "A"], "UP"),
+                ([ready, ready, ready], ["\x1b", "[", "B"], "DOWN"),
+                ([ready, ready, ready], ["\x1b", "[", "C"], "RIGHT"),
+                ([ready, ready, ready], ["\x1b", "[", "D"], "LEFT"),
+                ([ready, empty], ["\x1b"], "ESC"),  # ESC alone
+                ([ready, ready, ready, empty], ["\x1b", "[", "Z"], None),  # unknown
+                ([ready], ["\r"], "ENTER"),
+                ([ready], ["\n"], "ENTER"),
+                ([ready], ["\x7f"], "BACKSPACE"),
+                ([ready], ["\x08"], "BACKSPACE"),
+                ([ready], ["a"], "a"),  # Regular character
+                ([ready], ["\x01"], None),  # Non-printable control char
             ]
 
-            for select_return, stdin_chars, expected in test_cases:
-                mock_select.select.side_effect = [
-                    (
-                        select_return if i == 0 else [stdin_chars[i] is not None]
-                        for i in range(len(stdin_chars))
-                    )
-                ]
-                mock_stdin.read.side_effect = stdin_chars
+            for select_returns, stdin_chars, expected in test_cases:
+                with self.subTest(chars=stdin_chars):
+                    mock_select.select.reset_mock()
+                    mock_stdin.read.reset_mock()
+                    mock_select.select.side_effect = select_returns
+                    mock_stdin.read.side_effect = stdin_chars
 
-                key = handler.get_key(timeout=0.1)
-                self.assertEqual(key, expected)
-
-                # Reset mocks
-                mock_select.select.reset_mock()
-                mock_stdin.read.reset_mock()
+                    key = handler.get_key(timeout=0.1)
+                    self.assertEqual(key, expected)
+                    # Every queued char was consumed
+                    self.assertEqual(mock_stdin.read.call_count, len(stdin_chars))
 
     @patch("sys.platform", "darwin")
     def test_unix_keyboard_ctrl_c(self):
         """Test Unix keyboard handler Ctrl+C"""
-        with patch("realtime_search.termios"), patch("realtime_search.tty"), patch(
-            "realtime_search.select"
-        ) as mock_select, patch("sys.stdin") as mock_stdin:
+        with patch("realtime_search.termios", create=True), patch(
+            "realtime_search.tty", create=True
+        ), patch("realtime_search.select", create=True) as mock_select, patch("sys.stdin") as mock_stdin:
 
             handler = KeyboardHandler()
 
@@ -110,9 +114,11 @@ class TestKeyboardHandlerComprehensive(unittest.TestCase):
     @patch("sys.platform", "darwin")
     def test_unix_keyboard_timeout(self):
         """Test Unix keyboard timeout"""
-        with patch("realtime_search.termios"), patch("realtime_search.tty"), patch(
-            "realtime_search.select"
-        ) as mock_select:
+        with patch("realtime_search.termios", create=True), patch(
+            "realtime_search.tty", create=True
+        ), patch("realtime_search.select", create=True) as mock_select, patch(
+            "sys.stdin"
+        ) as mock_stdin:
 
             handler = KeyboardHandler()
 
@@ -121,11 +127,14 @@ class TestKeyboardHandlerComprehensive(unittest.TestCase):
 
             key = handler.get_key(timeout=0.1)
             self.assertIsNone(key)
+            # Timeout is passed through to select and nothing is read
+            self.assertEqual(mock_select.select.call_args[0][3], 0.1)
+            mock_stdin.read.assert_not_called()
 
     @patch("sys.platform", "win32")
     def test_windows_keyboard_all_keys(self):
         """Test Windows keyboard handler with all key types"""
-        with patch("realtime_search.msvcrt") as mock_msvcrt:
+        with patch("realtime_search.msvcrt", create=True) as mock_msvcrt:
             handler = KeyboardHandler()
 
             # Test timeout (no key pressed)
@@ -158,7 +167,7 @@ class TestKeyboardHandlerComprehensive(unittest.TestCase):
     @patch("sys.platform", "win32")
     def test_windows_keyboard_decode_error(self):
         """Test Windows keyboard with decode error"""
-        with patch("realtime_search.msvcrt") as mock_msvcrt:
+        with patch("realtime_search.msvcrt", create=True) as mock_msvcrt:
             handler = KeyboardHandler()
 
             mock_msvcrt.kbhit.return_value = True
@@ -272,9 +281,11 @@ class TestTerminalDisplayComprehensive(unittest.TestCase):
         output = self._get_stdout_content(mock_stdout)
         self.assertIn("Search: hello world", output)
 
-        # Check cursor positioning
-        final_call = mock_stdout.write.call_args_list[-1][0][0]
-        self.assertIn("\033[", final_call)  # ANSI cursor positioning
+        # Box sits below header (4) + results (3) + gap; the cursor is then
+        # moved onto the input line, 9 columns ("Search: " + 1) + cursor_pos
+        self.assertTrue(output.endswith("\033[11;14H"), repr(output[-20:]))
+        self.assertLess(output.index("Search: hello world"), output.rindex("\033[11;14H"))
+        mock_stdout.flush.assert_called()
 
 
 class TestRealTimeSearchComprehensive(unittest.TestCase):
@@ -423,18 +434,26 @@ class TestRealTimeSearchComprehensive(unittest.TestCase):
         self.assertNotIn("te", self.rts.results_cache)
 
     @patch("realtime_search.KeyboardHandler")
-    @patch("realtime_search.TerminalDisplay")
-    def test_run_exception_handling(self, mock_display_class, mock_keyboard_class):
-        """Test run method exception handling"""
+    def test_run_exception_handling(self, mock_keyboard_class):
+        """Unexpected errors propagate from run() but cleanup still happens"""
+        # display was built in setUp, so replace the instance attribute
+        self.rts.display = Mock()
+        self.mock_searcher.search.return_value = []
         mock_keyboard = Mock()
         mock_keyboard_class.return_value.__enter__.return_value = mock_keyboard
 
         # Make get_key raise exception after a few keys
         mock_keyboard.get_key.side_effect = ["a", "b", Exception("Test error")]
 
-        # Should return None on exception
-        result = self.rts.run()
-        self.assertIsNone(result)
+        with self.assertRaisesRegex(Exception, "Test error"):
+            self.rts.run()
+
+        # Keys before the error were handled
+        self.assertEqual(self.rts.state.query, "ab")
+        # finally-block cleanup: worker thread stopped, screen cleared again
+        self.assertFalse(self.rts.search_thread.is_alive())
+        self.assertEqual(self.rts.display.clear_screen.call_count, 2)
+        mock_keyboard_class.return_value.__exit__.assert_called_once()
 
     def test_handle_input_no_results_for_enter(self):
         """Test pressing Enter with no results"""

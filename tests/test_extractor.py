@@ -82,7 +82,7 @@ class TestClaudeConversationExtractor(unittest.TestCase):
         self.assertTrue(result.name.endswith(".md"))
 
         # Check content
-        content = result.read_text()
+        content = result.read_text(encoding="utf-8")
         self.assertIn("# Claude Conversation Log", content)
         self.assertIn("Session ID: test-session-id", content)
         self.assertIn("## 👤 User", content)
@@ -111,7 +111,7 @@ class TestClaudeConversationExtractor(unittest.TestCase):
             },
         ]
 
-        with open(jsonl_file, "w") as f:
+        with open(jsonl_file, "w", encoding="utf-8") as f:
             for entry in entries:
                 f.write(json.dumps(entry) + "\n")
 

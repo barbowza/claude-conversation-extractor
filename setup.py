@@ -81,6 +81,8 @@ setup(
         "search_conversations",
         "realtime_search",
         "search_cli",
+        "claude_web",
+        "claude_web_page",
     ],
     entry_points={
         "console_scripts": [
@@ -88,6 +90,7 @@ setup(
             "claude-logs=extract_claude_logs:launch_interactive",     # Kept for backward compatibility
             "claude-start=extract_claude_logs:launch_interactive",    # Alternative alias
             "claude-search=search_cli:main",                          # Direct search command
+            "claude-web=claude_web:main",                             # Browser viewer
         ],
     },
     cmdclass={

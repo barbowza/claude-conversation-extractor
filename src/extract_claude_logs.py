@@ -8,10 +8,69 @@ readable markdown files.
 """
 
 import argparse
+import functools
 import json
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+def desktop_app_sessions() -> Dict[str, dict]:
+    """Map CLI session id -> {title, archived} from the Claude desktop app, if installed."""
+    found: Dict[str, dict] = {}
+    roots = []
+    if os.environ.get("LOCALAPPDATA"):
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "Claude-Data")
+    roots.append(Path.home() / "Library" / "Application Support" / "Claude-Data")
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for f in root.glob("*/claude-code-sessions/**/local_*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            cli_id = data.get("cliSessionId") if isinstance(data, dict) else None
+            if cli_id:
+                found[cli_id] = {
+                    "title": data.get("title") or "",
+                    "archived": bool(data.get("isArchived")),
+                }
+    return found
+
+
+def _parse_timestamp(ts: str) -> Optional[datetime]:
+    """ISO timestamp from a Claude JSONL entry -> local tz-aware datetime, or None."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return None
+
+
+def safe_filename_part(text: str, max_len: int = 60) -> str:
+    """Turn a session title into a string that is safe inside a filename on any OS."""
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", text or "")
+    text = re.sub(r"\s+", "-", text.strip())
+    text = re.sub(r"-{2,}", "-", text).strip("-. ")
+    return text[:max_len].rstrip("-. ")
+
+
+def _handle_write_errors(save_method):
+    """Make a save_as_* method report write failures and return None instead of raising."""
+
+    @functools.wraps(save_method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return save_method(self, *args, **kwargs)
+        except OSError as e:
+            print(f"❌ Could not write export file: {e}")
+            return None
+
+    return wrapper
 
 
 class ClaudeConversationExtractor:
@@ -48,9 +107,91 @@ class ClaudeConversationExtractor:
             else:
                 # Fallback to current directory
                 self.output_dir = Path.cwd() / "claude-logs"
-                self.output_dir.mkdir(exist_ok=True)
+                try:
+                    self.output_dir.mkdir(exist_ok=True)
+                except Exception as e:
+                    # Don't crash on start-up; saving will report the problem.
+                    print(f"⚠️  Could not create {self.output_dir}: {e}")
 
         print(f"📁 Saving logs to: {self.output_dir}")
+
+    def get_session_info(self, session_id: str) -> Dict[str, Optional[datetime]]:
+        """Name and created / last-updated times (local, tz-aware) for a session.
+
+        The name is the desktop app's title, else the last custom title in the
+        JSONL. Times come from the first and last timestamps in the JSONL, with
+        the file's modification time as a fallback for the last update.
+        Missing values are "" (title) or None (times).
+        """
+        info: Dict = {"title": "", "created": None, "updated": None}
+        for path in self.claude_dir.rglob(f"{session_id}.jsonl"):
+            first_ts = last_ts = ""
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(entry, dict):
+                            continue
+                        ts = entry.get("timestamp")
+                        if isinstance(ts, str) and ts:
+                            first_ts = first_ts or ts
+                            last_ts = ts
+                        if entry.get("type") == "custom-title" and entry.get("customTitle"):
+                            info["title"] = entry["customTitle"]
+                        elif entry.get("type") == "summary" and entry.get("summary") and not info["title"]:
+                            info["title"] = entry["summary"]
+                info["created"] = _parse_timestamp(first_ts)
+                info["updated"] = _parse_timestamp(last_ts) or datetime.fromtimestamp(
+                    path.stat().st_mtime
+                ).astimezone()
+            except OSError:
+                continue
+            break
+        app = desktop_app_sessions().get(session_id)
+        if app and app.get("title"):
+            info["title"] = app["title"]
+        return info
+
+    def get_session_title(self, session_id: str) -> str:
+        """Session name, or "" when it has none."""
+        return self.get_session_info(session_id)["title"]
+
+    @staticmethod
+    def _header_fields(
+        session_id: str, info: Dict, conversation: List[Dict[str, str]], date_str: str
+    ) -> List[Tuple[str, str]]:
+        """(label, value) pairs for the top of an export; missing values are skipped.
+
+        Created / last updated fall back to the conversation's own timestamps when
+        the session file can't be found, and to a plain Date line if there are none.
+        """
+        stamps = [_parse_timestamp(m.get("timestamp", "")) for m in conversation]
+        stamps = [s for s in stamps if s]
+        created = info.get("created") or (stamps[0] if stamps else None)
+        updated = info.get("updated") or (stamps[-1] if stamps else None)
+
+        fields = []
+        if info.get("title"):
+            fields.append(("Session name", info["title"]))
+        fields.append(("Session ID", session_id))
+        if created:
+            fields.append(("Created", created.strftime("%Y-%m-%d %H:%M:%S")))
+        if updated:
+            fields.append(("Last updated", updated.strftime("%Y-%m-%d %H:%M:%S")))
+        if not created and not updated:
+            fields.append(("Date", date_str))
+        return fields
+
+    @staticmethod
+    def _output_filename(session_id: str, date_str: str, ext: str, title: str = "") -> str:
+        """Export filename: <session-name>-<date>-<id>, or the original name when untitled."""
+        prefix = safe_filename_part(title)
+        if prefix:
+            return f"{prefix}-{date_str}-{session_id[:8]}{ext}"
+        return f"claude-conversation-{date_str}-{session_id[:8]}{ext}"
 
     def find_sessions(self, project_path: Optional[str] = None) -> List[Path]:
         """Find all JSONL session files, sorted by most recent first."""
@@ -169,6 +310,8 @@ class ClaudeConversationExtractor:
             content: The content to extract from
             detailed: If True, include tool use blocks and other metadata
         """
+        if content is None:
+            return ""
         if isinstance(content, str):
             return content
         elif isinstance(content, list):
@@ -284,6 +427,7 @@ class ClaudeConversationExtractor:
             print(f"❌ Error displaying conversation: {e}")
             input("\nPress Enter to continue...")
 
+    @_handle_write_errors
     def save_as_markdown(
         self, conversation: List[Dict[str, str]], session_id: str
     ) -> Optional[Path]:
@@ -306,16 +450,21 @@ class ClaudeConversationExtractor:
             date_str = datetime.now().strftime("%Y-%m-%d")
             time_str = ""
 
-        filename = f"claude-conversation-{date_str}-{session_id[:8]}.md"
+        info = self.get_session_info(session_id)
+        filename = self._output_filename(session_id, date_str, ".md", info["title"])
         output_path = self.output_dir / filename
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("# Claude Conversation Log\n\n")
-            f.write(f"Session ID: {session_id}\n")
-            f.write(f"Date: {date_str}")
-            if time_str:
-                f.write(f" {time_str}")
-            f.write("\n\n---\n\n")
+            # Trailing two spaces = markdown line break, so each field gets its own line.
+            for label, value in self._header_fields(session_id, info, conversation, date_str):
+                if label == "Session name":
+                    # Use a longer backtick fence if the name itself contains backticks.
+                    fence = "`" * (max((len(r) for r in re.findall(r"`+", value)), default=0) + 1)
+                    pad = " " if value.startswith("`") or value.endswith("`") else ""
+                    value = f"{fence}{pad}{value}{pad}{fence}"
+                f.write(f"{label}: {value}  \n")
+            f.write("\n---\n\n")
 
             for msg in conversation:
                 role = msg["role"]
@@ -343,6 +492,7 @@ class ClaudeConversationExtractor:
 
         return output_path
     
+    @_handle_write_errors
     def save_as_json(
         self, conversation: List[Dict[str, str]], session_id: str
     ) -> Optional[Path]:
@@ -361,12 +511,16 @@ class ClaudeConversationExtractor:
         else:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
-        filename = f"claude-conversation-{date_str}-{session_id[:8]}.json"
+        info = self.get_session_info(session_id)
+        filename = self._output_filename(session_id, date_str, ".json", info["title"])
         output_path = self.output_dir / filename
 
         # Create JSON structure
         output = {
+            "session_name": info["title"] or None,
             "session_id": session_id,
+            "created": info["created"].isoformat() if info["created"] else None,
+            "last_updated": info["updated"].isoformat() if info["updated"] else None,
             "date": date_str,
             "message_count": len(conversation),
             "messages": conversation
@@ -377,6 +531,7 @@ class ClaudeConversationExtractor:
 
         return output_path
     
+    @_handle_write_errors
     def save_as_html(
         self, conversation: List[Dict[str, str]], session_id: str
     ) -> Optional[Path]:
@@ -398,8 +553,23 @@ class ClaudeConversationExtractor:
             date_str = datetime.now().strftime("%Y-%m-%d")
             time_str = ""
 
-        filename = f"claude-conversation-{date_str}-{session_id[:8]}.html"
+        info = self.get_session_info(session_id)
+        filename = self._output_filename(session_id, date_str, ".html", info["title"])
         output_path = self.output_dir / filename
+
+        def esc(text: str) -> str:
+            return (
+                str(text).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;")
+            )
+
+        header_html = "\n".join(
+            f"            <p>{esc(label)}: <code>{esc(value)}</code></p>"
+            if label == "Session name"
+            else f"            <p>{esc(label)}: {esc(value)}</p>"
+            for label, value in self._header_fields(session_id, info, conversation, date_str)
+        )
+        page_title = esc(info["title"] or f"Claude Conversation - {session_id[:8]}")
 
         # HTML template with modern styling
         html_content = f"""<!DOCTYPE html>
@@ -407,38 +577,72 @@ class ClaudeConversationExtractor:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Conversation - {session_id[:8]}</title>
+    <title>{page_title}</title>
     <style>
+        :root {{
+            color-scheme: light;
+            --bg: #f5f5f5; --text: #333; --heading: #2c3e50; --muted: #666;
+            --card: #ffffff; --shadow: rgba(0,0,0,0.1); --code: #f4f4f4;
+            --tool-use-bg: #fffbf0; --tool-result-bg: #fff5f5; --system-bg: #f8f9fa;
+        }}
+        :root[data-theme="dark"] {{
+            color-scheme: dark;
+            --bg: #161514; --text: #e6e4e0; --heading: #f2f0ec; --muted: #9b978f;
+            --card: #1f1e1c; --shadow: rgba(0,0,0,0.5); --code: #2a2825;
+            --tool-use-bg: #2a2418; --tool-result-bg: #2b1c1c; --system-bg: #232323;
+        }}
+        @media (prefers-color-scheme: dark) {{
+            :root:not([data-theme="light"]) {{
+                color-scheme: dark;
+                --bg: #161514; --text: #e6e4e0; --heading: #f2f0ec; --muted: #9b978f;
+                --card: #1f1e1c; --shadow: rgba(0,0,0,0.5); --code: #2a2825;
+                --tool-use-bg: #2a2418; --tool-result-bg: #2b1c1c; --system-bg: #232323;
+            }}
+        }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             line-height: 1.6;
-            color: #333;
+            color: var(--text);
             max-width: 900px;
             margin: 0 auto;
             padding: 20px;
-            background: #f5f5f5;
+            background: var(--bg);
         }}
         .header {{
-            background: white;
+            background: var(--card);
             padding: 20px;
             border-radius: 8px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px var(--shadow);
+            position: relative;
+        }}
+        .theme-toggle {{
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            font: inherit;
+            font-size: 0.85em;
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid var(--muted);
+            background: transparent;
+            color: var(--text);
+            cursor: pointer;
         }}
         h1 {{
-            color: #2c3e50;
+            color: var(--heading);
             margin: 0 0 10px 0;
         }}
         .metadata {{
-            color: #666;
+            color: var(--muted);
             font-size: 0.9em;
         }}
         .message {{
-            background: white;
+            background: var(--card);
             padding: 15px 20px;
             margin-bottom: 15px;
             border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px var(--shadow);
         }}
         .user {{
             border-left: 4px solid #3498db;
@@ -448,15 +652,15 @@ class ClaudeConversationExtractor:
         }}
         .tool_use {{
             border-left: 4px solid #f39c12;
-            background: #fffbf0;
+            background: var(--tool-use-bg);
         }}
         .tool_result {{
             border-left: 4px solid #e74c3c;
-            background: #fff5f5;
+            background: var(--tool-result-bg);
         }}
         .system {{
             border-left: 4px solid #95a5a6;
-            background: #f8f9fa;
+            background: var(--system-bg);
         }}
         .role {{
             font-weight: bold;
@@ -469,13 +673,13 @@ class ClaudeConversationExtractor:
             word-wrap: break-word;
         }}
         pre {{
-            background: #f4f4f4;
+            background: var(--code);
             padding: 10px;
             border-radius: 4px;
             overflow-x: auto;
         }}
         code {{
-            background: #f4f4f4;
+            background: var(--code);
             padding: 2px 4px;
             border-radius: 3px;
             font-family: 'Courier New', monospace;
@@ -484,10 +688,10 @@ class ClaudeConversationExtractor:
 </head>
 <body>
     <div class="header">
+        <button class="theme-toggle" id="theme-toggle" type="button">Theme: auto</button>
         <h1>Claude Conversation Log</h1>
         <div class="metadata">
-            <p>Session ID: {session_id}</p>
-            <p>Date: {date_str} {time_str}</p>
+{header_html}
             <p>Messages: {len(conversation)}</p>
         </div>
     </div>
@@ -518,7 +722,29 @@ class ClaudeConversationExtractor:
                 f.write(f'        <div class="content">{content}</div>\n')
                 f.write(f'    </div>\n')
             
-            f.write("\n</body>\n</html>")
+            # Theme toggle: auto (follows the OS) -> dark -> light, remembered per browser.
+            f.write(
+                "\n<script>\n"
+                "(function () {\n"
+                "  var modes = ['auto', 'dark', 'light'], key = 'claude-export-theme';\n"
+                "  var btn = document.getElementById('theme-toggle');\n"
+                "  function apply(m) {\n"
+                "    if (m === 'auto') document.documentElement.removeAttribute('data-theme');\n"
+                "    else document.documentElement.setAttribute('data-theme', m);\n"
+                "    btn.textContent = 'Theme: ' + m;\n"
+                "  }\n"
+                "  var mode = 'auto';\n"
+                "  try { mode = localStorage.getItem(key) || 'auto'; } catch (e) {}\n"
+                "  apply(mode);\n"
+                "  btn.addEventListener('click', function () {\n"
+                "    mode = modes[(modes.indexOf(mode) + 1) % modes.length];\n"
+                "    apply(mode);\n"
+                "    try { localStorage.setItem(key, mode); } catch (e) {}\n"
+                "  });\n"
+                "})();\n"
+                "</script>\n"
+            )
+            f.write("</body>\n</html>")
 
         return output_path
 
@@ -686,6 +912,9 @@ class ClaudeConversationExtractor:
                 conversation = self.extract_conversation(session_path, detailed=detailed)
                 if conversation:
                     output_path = self.save_conversation(conversation, session_path.stem, format=format)
+                    if not output_path:
+                        print(f"❌ Could not save session {idx + 1}")
+                        continue
                     success += 1
                     msg_count = len(conversation)
                     print(
@@ -894,7 +1123,8 @@ Examples:
                                     output = extractor.save_as_html(conversation, session_id)
                                 else:
                                     output = extractor.save_as_markdown(conversation, session_id)
-                                print(f"✅ Saved: {output.name}")
+                                if output:
+                                    print(f"✅ Saved: {output.name}")
             except (EOFError, KeyboardInterrupt):
                 print("\n👋 Cancelled")
         
@@ -1006,7 +1236,8 @@ def launch_interactive():
                     if conversation:
                         session_id = selected_file.stem
                         output = extractor.save_as_markdown(conversation, session_id)
-                        print(f"✅ Saved: {output.name}")
+                        if output:
+                            print(f"✅ Saved: {output.name}")
             except (EOFError, KeyboardInterrupt):
                 print("\n👋 Cancelled")
     else:

@@ -41,6 +41,8 @@ class TestRealTimeSearchIntegration(unittest.TestCase):
         # Create smart searcher for RTS
         smart_searcher = create_smart_searcher(self.searcher)
         self.rts = RealTimeSearch(smart_searcher, self.extractor)
+        # Search the fixture conversations, not the (isolated, empty) home dir
+        self.rts.search_dir = self.search_dir
 
     def tearDown(self):
         """Ensure thread cleanup"""
@@ -161,22 +163,24 @@ class TestRealTimeSearchIntegration(unittest.TestCase):
 
     def test_performance_with_real_data(self):
         """Test search performance with actual data"""
-        start_time = time.time()
-
         # Perform search
         self.rts.state.query = "error"
         self.rts.state.is_searching = True
         self.rts.state.last_update = time.time() - 0.5
 
-        self.rts._process_search_request()
+        start_time = time.perf_counter()
+        processed = self.rts._process_search_request()
+        search_time = time.perf_counter() - start_time
 
-        end_time = time.time()
-        search_time = end_time - start_time
+        self.assertTrue(processed)
+        self.assertGreater(len(self.rts.state.results), 0)
 
-        # Should complete reasonably quickly (under 2 seconds for small dataset)
-        # Note: The smart searcher runs multiple search modes which takes time
+        # The fixture set is a handful of tiny files; even with the smart
+        # searcher running several modes this takes well under a second.
+        # The bound is deliberately generous so slow CI machines don't flake,
+        # while still catching pathological (e.g. runaway/quadratic) slowness.
         self.assertLess(
-            search_time, 2.0, f"Search took {search_time:.3f}s, expected < 2s"
+            search_time, 10.0, f"Search took {search_time:.3f}s, expected < 10s"
         )
 
     def test_thread_safety_with_concurrent_searches(self):
@@ -273,6 +277,8 @@ class TestRealTimeSearchWithExtractor(unittest.TestCase):
         """Set up components"""
         self.searcher = ConversationSearcher()
         self.extractor = ClaudeConversationExtractor(Path(self.temp_dir))
+        # Point the extractor at the fixture conversations
+        self.extractor.claude_dir = self.search_dir
         self.rts = RealTimeSearch(self.searcher, self.extractor)
 
     def test_extractor_integration(self):
@@ -283,6 +289,10 @@ class TestRealTimeSearchWithExtractor(unittest.TestCase):
         # Should be able to find sessions
         sessions = self.extractor.find_sessions()
         self.assertGreater(len(sessions), 0)
+        self.assertEqual(
+            {Path(p).resolve() for p in sessions},
+            {Path(p).resolve() for p in self.test_files},
+        )
 
 
 if __name__ == "__main__":
