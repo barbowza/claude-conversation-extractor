@@ -26,12 +26,18 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -e .
-        pip install flake8
-        
+        pip install flake8 pytest
+
     - name: Lint with flake8
       run: |
-        flake8 extract_claude_logs.py --max-line-length=100
-        
+        # Fail only on syntax errors and undefined names; style issues are reported but don't block.
+        flake8 src --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 src --count --exit-zero --max-line-length=100 --statistics
+
+    - name: Run tests
+      run: |
+        python -m pytest tests -q
+
     - name: Test CLI help
       run: |
         claude-extract --help

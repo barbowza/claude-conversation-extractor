@@ -89,7 +89,7 @@ class TestConversationSearcher(unittest.TestCase):
             },
         ]
 
-        with open(self.test_file, "w") as f:
+        with open(self.test_file, "w", encoding="utf-8") as f:
             for conv in self.test_conversations:
                 f.write(json.dumps(conv) + "\n")
 
@@ -228,29 +228,39 @@ class TestSearchState(unittest.TestCase):
 class TestKeyboardHandler(unittest.TestCase):
     """Test KeyboardHandler functionality"""
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "termios/tty are Unix-only and not imported by realtime_search on Windows",
+    )
     @patch("sys.platform", "darwin")
     def test_context_manager(self):
         """Test KeyboardHandler as context manager"""
-        # Mock the Unix-specific modules
+        # Mock the Unix-specific modules, and stdin (pytest's captured stdin
+        # has no usable fileno)
         with patch("realtime_search.termios") as mock_termios, patch(
             "realtime_search.tty"
-        ) as mock_tty:
+        ) as mock_tty, patch("sys.stdin") as mock_stdin:
 
+            mock_stdin.fileno.return_value = 0
             mock_termios.tcgetattr.return_value = "old_settings"
 
             handler = KeyboardHandler()
             with handler:
                 self.assertIsNotNone(handler)
 
-            # Verify terminal settings were saved and restored
-            mock_termios.tcgetattr.assert_called_once()
-            mock_tty.setraw.assert_called_once()
-            mock_termios.tcsetattr.assert_called_once()
+            # Verify terminal settings were saved and restored on stdin's fd
+            mock_termios.tcgetattr.assert_called_once_with(0)
+            mock_tty.setraw.assert_called_once_with(0)
+            mock_termios.tcsetattr.assert_called_once_with(
+                0, mock_termios.TCSADRAIN, "old_settings"
+            )
 
     @patch("sys.platform", "win32")
     def test_windows_key_detection(self):
         """Test key detection on Windows"""
-        with patch("realtime_search.msvcrt") as mock_msvcrt:
+        # msvcrt is only imported on Windows; create=True lets the mock stand
+        # in for it on Linux/macOS too
+        with patch("realtime_search.msvcrt", create=True) as mock_msvcrt:
             handler = KeyboardHandler()
 
             # Test regular character
@@ -453,7 +463,7 @@ class TestIntegration(unittest.TestCase):
                 },
             ]
 
-            with open(chat_file, "w") as f:
+            with open(chat_file, "w", encoding="utf-8") as f:
                 for conv in conversations:
                     f.write(json.dumps(conv) + "\n")
 
@@ -472,12 +482,27 @@ class TestIntegration(unittest.TestCase):
             "Python project", search_dir=self.test_dir, mode="smart"
         )
 
-        # Should find results from all projects
-        self.assertEqual(len(results), 3)
+        # Smart search matches on query tokens as well as the exact phrase, so
+        # each project yields the question (exact "Python project" match) and
+        # the answer (shares the "project" token): 2 results x 3 projects.
+        self.assertEqual(len(results), 6)
 
-        # Results should be from different files
-        file_paths = {r.file_path for r in results}
-        self.assertEqual(len(file_paths), 3)
+        # Results should come from all three files
+        expected_files = {
+            self.test_dir / f"project_{i}" / f"chat_{i}.jsonl" for i in range(3)
+        }
+        self.assertEqual({r.file_path for r in results}, expected_files)
+
+        # Exact-phrase matches (the questions) outrank partial token matches
+        top, rest = results[:3], results[3:]
+        for result in top:
+            self.assertEqual(result.speaker, "human")
+            self.assertIn("**PYTHON PROJECT**", result.context)
+        for result in rest:
+            self.assertEqual(result.speaker, "assistant")
+        self.assertGreater(
+            min(r.relevance_score for r in top), max(r.relevance_score for r in rest)
+        )
 
     @patch("realtime_search.threading.Thread")
     @patch("realtime_search.KeyboardHandler")

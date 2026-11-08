@@ -104,7 +104,8 @@ def main():
                             conversation = extractor.extract_conversation(session_paths[0])
                             if conversation:
                                 output = extractor.save_as_markdown(conversation, sessions[0][1])
-                                print(f"✅ Saved: {output.name}")
+                                if output:
+                                    print(f"✅ Saved: {output.name}")
                     else:
                         # Multiple results, let user choose
                         print("\nSelect conversation to view:")
@@ -122,7 +123,8 @@ def main():
                                     conversation = extractor.extract_conversation(session_paths[view_num - 1])
                                     if conversation:
                                         output = extractor.save_as_markdown(conversation, sessions[view_num - 1][1])
-                                        print(f"✅ Saved: {output.name}")
+                                        if output:
+                                            print(f"✅ Saved: {output.name}")
                         except (ValueError, IndexError):
                             print("❌ Invalid selection")
                 
@@ -133,7 +135,8 @@ def main():
                         conversation = extractor.extract_conversation(session_path)
                         if conversation:
                             output = extractor.save_as_markdown(conversation, sid)
-                            print(f"✅ Saved: {output.name}")
+                            if output:
+                                print(f"✅ Saved: {output.name}")
                 
                 elif choice == 'Q':
                     print("\n👋 Goodbye!")

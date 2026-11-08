@@ -8,10 +8,25 @@ readable markdown files.
 """
 
 import argparse
+import functools
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+def _handle_write_errors(save_method):
+    """Make a save_as_* method report write failures and return None instead of raising."""
+
+    @functools.wraps(save_method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return save_method(self, *args, **kwargs)
+        except OSError as e:
+            print(f"❌ Could not write export file: {e}")
+            return None
+
+    return wrapper
 
 
 class ClaudeConversationExtractor:
@@ -48,7 +63,11 @@ class ClaudeConversationExtractor:
             else:
                 # Fallback to current directory
                 self.output_dir = Path.cwd() / "claude-logs"
-                self.output_dir.mkdir(exist_ok=True)
+                try:
+                    self.output_dir.mkdir(exist_ok=True)
+                except Exception as e:
+                    # Don't crash on start-up; saving will report the problem.
+                    print(f"⚠️  Could not create {self.output_dir}: {e}")
 
         print(f"📁 Saving logs to: {self.output_dir}")
 
@@ -169,6 +188,8 @@ class ClaudeConversationExtractor:
             content: The content to extract from
             detailed: If True, include tool use blocks and other metadata
         """
+        if content is None:
+            return ""
         if isinstance(content, str):
             return content
         elif isinstance(content, list):
@@ -284,6 +305,7 @@ class ClaudeConversationExtractor:
             print(f"❌ Error displaying conversation: {e}")
             input("\nPress Enter to continue...")
 
+    @_handle_write_errors
     def save_as_markdown(
         self, conversation: List[Dict[str, str]], session_id: str
     ) -> Optional[Path]:
@@ -343,6 +365,7 @@ class ClaudeConversationExtractor:
 
         return output_path
     
+    @_handle_write_errors
     def save_as_json(
         self, conversation: List[Dict[str, str]], session_id: str
     ) -> Optional[Path]:
@@ -377,6 +400,7 @@ class ClaudeConversationExtractor:
 
         return output_path
     
+    @_handle_write_errors
     def save_as_html(
         self, conversation: List[Dict[str, str]], session_id: str
     ) -> Optional[Path]:
@@ -686,6 +710,9 @@ class ClaudeConversationExtractor:
                 conversation = self.extract_conversation(session_path, detailed=detailed)
                 if conversation:
                     output_path = self.save_conversation(conversation, session_path.stem, format=format)
+                    if not output_path:
+                        print(f"❌ Could not save session {idx + 1}")
+                        continue
                     success += 1
                     msg_count = len(conversation)
                     print(
@@ -894,7 +921,8 @@ Examples:
                                     output = extractor.save_as_html(conversation, session_id)
                                 else:
                                     output = extractor.save_as_markdown(conversation, session_id)
-                                print(f"✅ Saved: {output.name}")
+                                if output:
+                                    print(f"✅ Saved: {output.name}")
             except (EOFError, KeyboardInterrupt):
                 print("\n👋 Cancelled")
         
@@ -1006,7 +1034,8 @@ def launch_interactive():
                     if conversation:
                         session_id = selected_file.stem
                         output = extractor.save_as_markdown(conversation, session_id)
-                        print(f"✅ Saved: {output.name}")
+                        if output:
+                            print(f"✅ Saved: {output.name}")
             except (EOFError, KeyboardInterrupt):
                 print("\n👋 Cancelled")
     else:

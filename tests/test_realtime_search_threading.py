@@ -112,8 +112,10 @@ class TestRealTimeSearchThreading(unittest.TestCase):
         # Verify thread is running
         self.assertTrue(thread.is_alive())
 
-        # Thread should stop when main program exits (daemon=True)
-        # No need to explicitly stop it in tests
+        # stop() signals the worker and joins it
+        self.rts.search_thread = thread
+        self.rts.stop()
+        self.assertFalse(thread.is_alive())
 
 
 class TestRealTimeSearchUI(unittest.TestCase):
@@ -123,12 +125,18 @@ class TestRealTimeSearchUI(unittest.TestCase):
         """Set up test fixtures"""
         self.mock_searcher = Mock()
         self.mock_extractor = Mock()
+        # RealTimeSearch builds its TerminalDisplay in __init__, so patch the
+        # class before constructing it
+        patcher = patch("realtime_search.TerminalDisplay")
+        mock_display_class = patcher.start()
+        self.addCleanup(patcher.stop)
         self.rts = RealTimeSearch(self.mock_searcher, self.mock_extractor)
+        self.mock_display = mock_display_class.return_value
+        self.assertIs(self.rts.display, self.mock_display)
 
     @patch("realtime_search.threading.Thread")
     @patch("realtime_search.KeyboardHandler")
-    @patch.object(RealTimeSearch, "display")
-    def test_run_exit_key(self, mock_display, mock_keyboard_class, mock_thread_class):
+    def test_run_exit_key(self, mock_keyboard_class, mock_thread_class):
         """Test run exits on ESC key"""
         # Set up mocks
         mock_keyboard = Mock()
@@ -143,20 +151,14 @@ class TestRealTimeSearchUI(unittest.TestCase):
         result = self.rts.run()
 
         self.assertIsNone(result)
+        self.assertEqual(self.rts.state.query, "abc")
         mock_thread.start.assert_called_once()
-        mock_display.clear_screen.assert_called()
+        self.mock_display.clear_screen.assert_called()
 
     @patch("realtime_search.threading.Thread")
     @patch("realtime_search.KeyboardHandler")
-    @patch("realtime_search.TerminalDisplay")
-    def test_run_select_result(
-        self, mock_display_class, mock_keyboard_class, mock_thread_class
-    ):
+    def test_run_select_result(self, mock_keyboard_class, mock_thread_class):
         """Test run returns selected file path"""
-        # Set up mocks
-        mock_display = Mock()
-        mock_display_class.return_value = mock_display
-
         mock_keyboard = Mock()
         mock_keyboard_class.return_value.__enter__.return_value = mock_keyboard
 
@@ -177,18 +179,15 @@ class TestRealTimeSearchUI(unittest.TestCase):
         result = self.rts.run()
 
         self.assertEqual(result, test_path)
+        self.assertEqual(self.rts.state.query, "test")
+        # Each typed key triggered a redraw of the results
+        self.assertGreaterEqual(self.mock_display.draw_results.call_count, 5)
 
     @patch("realtime_search.threading.Thread")
     @patch("realtime_search.KeyboardHandler")
-    @patch("realtime_search.TerminalDisplay")
-    def test_run_keyboard_interrupt(
-        self, mock_display_class, mock_keyboard_class, mock_thread_class
-    ):
+    def test_run_keyboard_interrupt(self, mock_keyboard_class, mock_thread_class):
         """Test run handles KeyboardInterrupt"""
         # Set up mocks
-        mock_display = Mock()
-        mock_display_class.return_value = mock_display
-
         mock_keyboard = Mock()
         mock_keyboard_class.return_value.__enter__.return_value = mock_keyboard
         mock_keyboard.get_key.side_effect = KeyboardInterrupt()
@@ -201,19 +200,14 @@ class TestRealTimeSearchUI(unittest.TestCase):
         result = self.rts.run()
 
         self.assertIsNone(result)
-        mock_display.clear_screen.assert_called()
+        self.mock_display.clear_screen.assert_called()
+        mock_thread.join.assert_called_once()
 
     @patch("realtime_search.threading.Thread")
     @patch("realtime_search.KeyboardHandler")
-    @patch("realtime_search.TerminalDisplay")
-    def test_run_exception_cleanup(
-        self, mock_display_class, mock_keyboard_class, mock_thread_class
-    ):
+    def test_run_exception_cleanup(self, mock_keyboard_class, mock_thread_class):
         """Test run cleans up on exception"""
         # Set up mocks
-        mock_display = Mock()
-        mock_display_class.return_value = mock_display
-
         mock_keyboard = Mock()
         mock_keyboard_class.return_value.__enter__.return_value = mock_keyboard
         mock_keyboard.get_key.side_effect = Exception("Test error")
@@ -222,12 +216,15 @@ class TestRealTimeSearchUI(unittest.TestCase):
         mock_thread = Mock()
         mock_thread_class.return_value = mock_thread
 
-        # Should handle exception and clean up
-        with self.assertRaises(Exception):
+        # Non-KeyboardInterrupt errors propagate out of run()...
+        with self.assertRaisesRegex(Exception, "Test error"):
             self.rts.run()
 
-        # Cleanup should still happen
-        mock_display.clear_screen.assert_called()
+        # ...but the finally-block cleanup still happens
+        self.assertEqual(self.mock_display.clear_screen.call_count, 2)
+        self.assertTrue(self.rts.stop_event.is_set())
+        mock_thread.join.assert_called_once()
+        mock_keyboard_class.return_value.__exit__.assert_called_once()
 
 
 if __name__ == "__main__":

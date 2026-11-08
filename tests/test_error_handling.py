@@ -18,6 +18,11 @@ from extract_claude_logs import (ClaudeConversationExtractor,  # noqa: E402
                                  launch_interactive, main)
 
 
+def _fake_search_module(searcher):
+    """Build a stand-in search_conversations module returning ``searcher``."""
+    return Mock(ConversationSearcher=Mock(return_value=searcher))
+
+
 class TestErrorHandling(unittest.TestCase):
     """Test error handling and edge cases"""
 
@@ -36,14 +41,22 @@ class TestErrorHandling(unittest.TestCase):
         with patch("pathlib.Path.mkdir", side_effect=Exception("Permission denied")):
             with patch("pathlib.Path.touch", side_effect=Exception("No write access")):
                 with patch("pathlib.Path.cwd", return_value=Path(self.temp_dir)):
-                    # Should still create extractor, falling back to cwd
-                    extractor = ClaudeConversationExtractor(None)
-                    self.assertIn("claude-logs", str(extractor.output_dir))
+                    with patch("builtins.print") as mock_print:
+                        # Should still create extractor, falling back to cwd
+                        extractor = ClaudeConversationExtractor(None)
+                    self.assertEqual(
+                        extractor.output_dir, Path(self.temp_dir) / "claude-logs"
+                    )
+                    # The failed fallback mkdir is reported, not raised
+                    print_calls = [str(call) for call in mock_print.call_args_list]
+                    self.assertTrue(
+                        any("Could not create" in call for call in print_calls)
+                    )
 
     def test_extract_conversation_permission_error(self):
         """Test extract_conversation with permission error"""
         test_file = Path(self.temp_dir) / "test.jsonl"
-        test_file.write_text('{"type": "test"}')
+        test_file.write_text('{"type": "test"}', encoding="utf-8")
 
         extractor = ClaudeConversationExtractor(self.temp_dir)
 
@@ -62,9 +75,12 @@ class TestErrorHandling(unittest.TestCase):
         conversation = [{"role": "user", "content": "Test", "timestamp": ""}]
 
         with patch("builtins.open", side_effect=IOError("Disk full")):
-            # Should handle error gracefully
-            _ = extractor.save_as_markdown(conversation, "test")
-            # The current implementation doesn't catch this, but it should
+            with patch("builtins.print") as mock_print:
+                # Should handle error gracefully and return None
+                result = extractor.save_as_markdown(conversation, "test")
+        self.assertIsNone(result)
+        print_calls = [str(call) for call in mock_print.call_args_list]
+        self.assertTrue(any("Disk full" in call for call in print_calls))
 
     def test_list_recent_sessions_no_sessions_messages(self):
         """Test list_recent_sessions prints correct messages when no sessions"""
@@ -116,7 +132,9 @@ class TestMainFunctionErrorCases(unittest.TestCase):
                 return_value=[Path("test.jsonl")],
             ):
                 with patch.object(
-                    ClaudeConversationExtractor, "extract_multiple"
+                    ClaudeConversationExtractor,
+                    "extract_multiple",
+                    return_value=(1, 1),
                 ) as mock_extract:
                     with patch("builtins.print") as mock_print:
                         main()
@@ -150,35 +168,34 @@ class TestMainFunctionErrorCases(unittest.TestCase):
                 with patch.object(
                     ClaudeConversationExtractor, "extract_multiple", return_value=(0, 0)
                 ) as mock_extract:
-                    with patch("builtins.print"):
+                    with patch("builtins.print") as mock_print:
                         main()
 
                         # Should handle empty list gracefully
-                        mock_extract.assert_called_once_with([], [])
+                        mock_extract.assert_called_once_with(
+                            [], [], format="markdown", detailed=False
+                        )
+                        print_calls = [str(call) for call in mock_print.call_args_list]
+                        self.assertTrue(
+                            any("Successfully extracted 0/0" in c for c in print_calls)
+                        )
 
     def test_main_search_import_error(self):
-        """Test main handles search import error"""
+        """Test main propagates a missing search module as ImportError"""
         with patch("sys.argv", ["prog", "--search", "test"]):
-            # Simulate import error
-            with patch("builtins.__import__", side_effect=ImportError("No module")):
+            # A None entry in sys.modules makes the import raise ImportError
+            with patch.dict("sys.modules", {"search_conversations": None}):
                 with patch("builtins.print"):
-                    with patch("sys.exit"):
-                        # Should handle import error gracefully
-                        try:
-                            main()
-                        except ImportError:
-                            pass  # Expected
+                    with self.assertRaises(ImportError):
+                        main()
 
     def test_launch_interactive_import_error(self):
-        """Test launch_interactive handles import error"""
-        with patch("builtins.__import__", side_effect=ImportError("No interactive_ui")):
-            with patch("builtins.print"):
-                with patch("sys.exit"):
-                    # Should handle import error gracefully
-                    try:
+        """Test launch_interactive propagates a missing interactive_ui"""
+        with patch("sys.argv", ["prog"]):
+            with patch.dict("sys.modules", {"interactive_ui": None}):
+                with patch("builtins.print"):
+                    with self.assertRaises(ImportError):
                         launch_interactive()
-                    except ImportError:
-                        pass  # Expected in current implementation
 
 
 class TestSearchFunctionality(unittest.TestCase):
@@ -191,37 +208,38 @@ class TestSearchFunctionality(unittest.TestCase):
             mock_searcher = Mock()
             mock_searcher.search.return_value = [
                 Mock(
-                    file_path=Path("test.jsonl"),
+                    file_path=Path("project") / "test.jsonl",
                     conversation_id="123",
                     matched_content="test match",
                     speaker="human",
                     relevance_score=0.9,
+                    timestamp=datetime(2024, 1, 1),
                 )
             ]
 
-            with patch("extract_claude_logs.datetime") as mock_dt:
-                mock_dt.now.return_value = datetime(2024, 1, 1)
-                mock_dt.fromisoformat = datetime.fromisoformat
-
-                # Create a mock that returns our mock_searcher
-                with patch.dict(
-                    "sys.modules",
-                    {
-                        "search_conversations": Mock(
-                            ConversationSearcher=Mock(return_value=mock_searcher)
-                        )
-                    },
-                ):
+            with patch.dict(
+                "sys.modules", {"search_conversations": _fake_search_module(mock_searcher)}
+            ):
+                # Skip the "view a conversation?" prompt
+                with patch("builtins.input", return_value="") as mock_input:
                     with patch("builtins.print") as mock_print:
                         main()
 
-                        # Should call search
-                        mock_searcher.search.assert_called()
+                        # Should call search in smart mode
+                        mock_searcher.search.assert_called_once()
+                        call_kwargs = mock_searcher.search.call_args[1]
+                        self.assertEqual(call_kwargs["query"], "test query")
+                        self.assertEqual(call_kwargs["mode"], "smart")
+                        self.assertIsNone(call_kwargs["speaker_filter"])
+                        mock_input.assert_called_once()
 
                         # Should print results
                         print_calls = [str(call) for call in mock_print.call_args_list]
                         self.assertTrue(
-                            any("Found 1 results" in str(call) for call in print_calls)
+                            any("Found 1 matches" in str(call) for call in print_calls)
+                        )
+                        self.assertTrue(
+                            any("test match" in str(call) for call in print_calls)
                         )
 
     def test_main_search_with_filters(self):
@@ -230,10 +248,8 @@ class TestSearchFunctionality(unittest.TestCase):
             "sys.argv",
             [
                 "prog",
-                "--search",
-                "test",
-                "--search-mode",
-                "regex",
+                "--search-regex",
+                "test.*",
                 "--search-speaker",
                 "human",
                 "--search-date-from",
@@ -241,56 +257,88 @@ class TestSearchFunctionality(unittest.TestCase):
                 "--search-date-to",
                 "2024-12-31",
                 "--case-sensitive",
-                "--search-project",
-                "myproject",
             ],
         ):
             mock_searcher = Mock()
             mock_searcher.search.return_value = []
 
             with patch.dict(
-                "sys.modules",
-                {
-                    "search_conversations": Mock(
-                        ConversationSearcher=Mock(return_value=mock_searcher)
-                    )
-                },
+                "sys.modules", {"search_conversations": _fake_search_module(mock_searcher)}
             ):
-                with patch("builtins.print"):
-                    main()
+                with patch("builtins.input") as mock_input:
+                    with patch("builtins.print") as mock_print:
+                        main()
 
-                    # Verify search was called with correct parameters
-                    mock_searcher.search.assert_called_once()
-                    call_kwargs = mock_searcher.search.call_args[1]
-                    self.assertEqual(call_kwargs["mode"], "regex")
-                    self.assertEqual(call_kwargs["speaker_filter"], "human")
-                    self.assertTrue(call_kwargs["case_sensitive"])
-                    self.assertEqual(call_kwargs["search_dir"], "myproject")
+                        # Verify search was called with correct parameters
+                        mock_searcher.search.assert_called_once()
+                        call_kwargs = mock_searcher.search.call_args[1]
+                        self.assertEqual(call_kwargs["query"], "test.*")
+                        self.assertEqual(call_kwargs["mode"], "regex")
+                        self.assertEqual(call_kwargs["speaker_filter"], "human")
+                        self.assertTrue(call_kwargs["case_sensitive"])
+                        self.assertEqual(call_kwargs["date_from"], datetime(2024, 1, 1))
+                        self.assertEqual(call_kwargs["date_to"], datetime(2024, 12, 31))
+
+                        # No results: no prompt, "No matches" message
+                        mock_input.assert_not_called()
+                        print_calls = [str(call) for call in mock_print.call_args_list]
+                        self.assertTrue(
+                            any("No matches found" in str(call) for call in print_calls)
+                        )
+
+    def test_main_search_invalid_date(self):
+        """Test search rejects a malformed date filter without searching"""
+        with patch("sys.argv", ["prog", "--search", "x", "--search-date-from", "bad"]):
+            mock_searcher = Mock()
+            with patch.dict(
+                "sys.modules", {"search_conversations": _fake_search_module(mock_searcher)}
+            ):
+                with patch("builtins.print") as mock_print:
+                    main()
+                    mock_searcher.search.assert_not_called()
+                    print_calls = [str(call) for call in mock_print.call_args_list]
+                    self.assertTrue(
+                        any("Invalid date format: bad" in c for c in print_calls)
+                    )
 
 
 class TestInteractiveMode(unittest.TestCase):
     """Test interactive mode functionality"""
 
+    def _run_with_fake_ui(self, func, argv):
+        mock_ui_main = Mock()
+        with patch("sys.argv", argv):
+            with patch.dict("sys.modules", {"interactive_ui": Mock(main=mock_ui_main)}):
+                func()
+        return mock_ui_main
+
     def test_main_interactive_flag_calls_launch(self):
-        """Test --interactive flag calls launch_interactive"""
-        with patch("sys.argv", ["prog", "--interactive"]):
-            with patch("extract_claude_logs.launch_interactive") as mock_launch:
-                main()
-                mock_launch.assert_called_once()
+        """Test --interactive flag launches the interactive UI"""
+        with patch.object(ClaudeConversationExtractor, "__init__", return_value=None) as mock_init:
+            mock_ui_main = self._run_with_fake_ui(main, ["prog", "--interactive"])
+        mock_ui_main.assert_called_once()
+        # Interactive mode returns before building a CLI extractor
+        mock_init.assert_not_called()
 
     def test_main_export_flag_calls_interactive(self):
-        """Test --export flag launches interactive mode"""
-        with patch("sys.argv", ["prog", "--export", "logs"]):
-            with patch("extract_claude_logs.launch_interactive") as mock_launch:
-                main()
-                mock_launch.assert_called_once()
+        """Test --export logs launches interactive mode"""
+        mock_ui_main = self._run_with_fake_ui(main, ["prog", "--export", "logs"])
+        mock_ui_main.assert_called_once()
 
-    def test_main_no_args_calls_interactive(self):
-        """Test no arguments launches interactive mode"""
-        with patch("sys.argv", ["prog"]):
-            with patch("extract_claude_logs.launch_interactive") as mock_launch:
-                main()
-                mock_launch.assert_called_once()
+    def test_main_no_args_lists_sessions(self):
+        """Test main() with no arguments lists sessions instead of the UI"""
+        with patch.object(
+            ClaudeConversationExtractor, "list_recent_sessions", return_value=[]
+        ) as mock_list:
+            with patch("builtins.print"):
+                mock_ui_main = self._run_with_fake_ui(main, ["prog"])
+        mock_ui_main.assert_not_called()
+        mock_list.assert_called_once_with(None)
+
+    def test_launch_interactive_no_args_calls_interactive(self):
+        """Test the console entry point with no arguments launches the UI"""
+        mock_ui_main = self._run_with_fake_ui(launch_interactive, ["claude-start"])
+        mock_ui_main.assert_called_once()
 
 
 if __name__ == "__main__":
