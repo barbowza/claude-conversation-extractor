@@ -25,8 +25,10 @@ def isolated_home(tmp_path, monkeypatch):
     (home / ".claude" / "projects").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    # desktop_app_sessions() reads Claude desktop app titles from here.
+    # desktop_app_sessions() reads Claude desktop app titles from these.
     monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
+    monkeypatch.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     # Run with the temp dir as cwd so "./claude-logs" fallbacks stay inside it.
     monkeypatch.chdir(tmp_path)
     # Never let a test clear the developer's terminal.
