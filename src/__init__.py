@@ -1,6 +1,6 @@
 """Claude Conversation Extractor - Extract Claude Code conversations to various formats."""
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 __author__ = "Dustin Kirby"
 
 from .extract_claude_logs import ClaudeConversationExtractor

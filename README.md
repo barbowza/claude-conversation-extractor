@@ -2,10 +2,11 @@
 
 > 🚀 **The ONLY tool to export Claude Code conversations**. Extract Claude chat history from ~/.claude/projects, search through logs, and backup your AI programming sessions.
 
-## 🎮 Two Ways to Use
+## 🎮 Three Ways to Use
 
 - **`claude-start`** - Interactive UI with ASCII art logo, real-time search, and menu-driven interface (recommended)
 - **`claude-extract`** - Plain CLI for command-line operations and scripting
+- **`claude-web`** - Local browser viewer for reading, filtering and exporting sessions ([details](#-browse-conversations-in-your-browser---claude-web))
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -165,9 +166,16 @@ claude-extract --format html --all
 # Include tool use, MCP responses, and system messages
 claude-extract --detailed --extract 1
 
+# Include Claude's extended thinking and per-message times
+claude-extract --thinking --timestamps --extract 1
+
 # Combine options for complete exports
-claude-extract --format html --detailed --recent 5
+claude-extract --format html --detailed --thinking --recent 5
 ```
+
+By default, exports contain only the conversation itself: your prompts (including ones you typed while Claude was mid-turn) and Claude's replies. Tool calls and results, thinking, and timestamps are opt-in.
+
+**Export file names** use the session's name: `<session-name>-<date>-<id8>.md`. The name comes from the Claude desktop app's title or the session's custom title. Untitled sessions are saved as `claude-conversation-<date>-<id8>.md`. Each export starts with a header showing the session name, session ID, and created and last-updated times. HTML exports have a light/dark theme toggle.
 
 **Supported Formats:**
 - **Markdown** (default) - Clean, readable text format
@@ -177,10 +185,14 @@ claude-extract --format html --detailed --recent 5
 **Detailed Mode (`--detailed`):**
 Includes complete conversation transcript with:
 - Tool use invocations and parameters
-- MCP server responses
+- Tool results and MCP server responses
 - System messages and errors
 - Terminal command outputs
 - All metadata from the conversation
+
+**Other opt-in content:**
+- `--thinking` - Claude's extended thinking, where the log stored its text
+- `--timestamps` - each message's time (local time zone) in Markdown and HTML exports
 
 ### 🔍 Search Claude Code Chat History
 
@@ -203,6 +215,32 @@ claude-extract
 - Finds exact matches, partial matches, and patterns
 - Shows match previews and conversation context
 - Option to extract matching sessions directly
+
+### 🌐 Browse Conversations in Your Browser - `claude-web`
+
+`claude-web` starts a small local web server and opens a page that lists every Claude Code session on your machine:
+
+```bash
+claude-web                  # Serves http://127.0.0.1:8765/ and opens your browser
+claude-web --port 9000      # Use a different port
+claude-web --no-browser     # Start the server without opening a tab
+```
+
+Press `Ctrl+C` to stop it.
+
+**Session list:**
+- Filter by title, prompt, project folder or session ID
+- Sort by last modified, size or message count
+- Show or hide subagent and archived sessions
+- **Refresh** rescans for new sessions without restarting
+
+**Conversation view:**
+- Toggle **Tool calls & results**, **Thinking** and **Timestamps** (all off by default, matching the CLI)
+- **Your prompts only** hides Claude's replies
+- **Highlight in conversation** marks every match of a search term
+- **Export .md / .html / .json** downloads the session with the options currently selected
+
+**Local only:** the server listens on `127.0.0.1` only and rejects requests whose `Host` header isn't localhost. It reads sessions only from `~/.claude/projects` and escapes all conversation content before rendering it. It uses only the Python standard library.
 
 ## 📁 Where Are Claude Code Logs Stored?
 
@@ -336,6 +374,13 @@ See [INSTALL.md](docs/user/INSTALL.md) for:
 - ✅ **Read-Only**: Never modifies your Claude Code files
 
 ## 📈 Roadmap for Claude Code Export Tool
+
+### ✅ Completed in v1.2.0
+- [x] Local browser viewer (`claude-web`)
+- [x] Export files named after the session, with a session header
+- [x] Opt-in thinking (`--thinking`) and timestamps (`--timestamps`)
+- [x] Recover prompts typed mid-turn and tool results
+- [x] Dark theme for HTML exports
 
 ### ✅ Completed in v1.1.1
 - [x] Export Claude Code conversations to Markdown
