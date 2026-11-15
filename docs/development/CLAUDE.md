@@ -70,7 +70,7 @@ pip install -e .
 ## Important Notes
 
 - No external dependencies (uses only Python stdlib)
-- Supports Python 3.8+
+- Supports Python 3.10+
 - Cross-platform (Windows, macOS, Linux)
 - Read-only access to Claude's conversation files
 - Includes legal disclaimer for safety

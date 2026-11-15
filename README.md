@@ -8,7 +8,7 @@
 - **`claude-extract`** - Plain CLI for command-line operations and scripting
 - **`claude-web`** - Local browser viewer for reading, filtering and exporting sessions ([details](#-browse-conversations-in-your-browser---claude-web))
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PyPI version](https://badge.fury.io/py/claude-conversation-extractor.svg)](https://badge.fury.io/py/claude-conversation-extractor)
 [![Downloads](https://pepy.tech/badge/claude-conversation-extractor)](https://pepy.tech/project/claude-conversation-extractor)
@@ -314,7 +314,7 @@ No, this is an independent open-source tool. It reads the local Claude Code file
 5. **Enables search**: Indexes content for instant searching
 
 ### Requirements
-- Python 3.8+ (works with 3.9, 3.10, 3.11, 3.12)
+- Python 3.10+ (tested on 3.10 through 3.15)
 - Claude Code installed with existing conversations
 - No external dependencies for core features
 
