@@ -77,3 +77,16 @@ def test_own_id_beats_another_sessions_prior_id(isolated_home):
     got = desktop_app_sessions()
     assert got["parent"]["title"] == "Parent"
     assert got["child"]["title"] == "Child"
+
+
+def test_titled_entry_beats_newer_untitled_one(isolated_home):
+    _write_session(isolated_home / "AppData" / "Roaming" / "Claude", "dup", "Titled", mtime=1_000)
+    _write_session(isolated_home / "AppData" / "Local" / "Claude-Data" / "p", "dup", "", mtime=2_000)
+    assert desktop_app_sessions()["dup"]["title"] == "Titled"
+
+
+def test_ids_from_one_file_get_separate_entries(isolated_home):
+    _write_session(isolated_home / "AppData" / "Roaming" / "Claude", "now", "T", prior=["old"])
+    got = desktop_app_sessions()
+    assert got["now"] == got["old"]
+    assert got["now"] is not got["old"]
