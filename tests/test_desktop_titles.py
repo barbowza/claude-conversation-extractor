@@ -8,11 +8,13 @@ from extract_claude_logs import desktop_app_sessions
 
 
 def _write_session(app_dir: Path, cli_id: str, title: str, archived: bool = False,
-                   mtime: float = None) -> Path:
+                   mtime: float = None, prior: list = None) -> Path:
     f = app_dir / "claude-code-sessions" / "org" / "acct" / f"local_{cli_id}.json"
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({"cliSessionId": cli_id, "title": title,
-                             "isArchived": archived}), encoding="utf-8")
+    data = {"cliSessionId": cli_id, "title": title, "isArchived": archived}
+    if prior is not None:
+        data["priorCliSessionIds"] = prior
+    f.write_text(json.dumps(data), encoding="utf-8")
     if mtime is not None:
         os.utime(f, (mtime, mtime))
     return f
@@ -57,3 +59,21 @@ def test_skips_unreadable_and_idless_files(isolated_home):
     (app / "claude-code-sessions" / "local_noid.json").write_text("{}", encoding="utf-8")
     (app / "claude-code-sessions" / "local_list.json").write_text("[]", encoding="utf-8")
     assert list(desktop_app_sessions()) == ["good"]
+
+
+def test_prior_session_ids_get_the_same_title(isolated_home):
+    app = isolated_home / "AppData" / "Roaming" / "Claude"
+    _write_session(app, "now", "Resumed", archived=True, prior=["old1", "old2"])
+    got = desktop_app_sessions()
+    assert set(got) == {"now", "old1", "old2"}
+    assert got["old1"] == {"title": "Resumed", "archived": True}
+
+
+def test_own_id_beats_another_sessions_prior_id(isolated_home):
+    app = isolated_home / "AppData" / "Roaming" / "Claude"
+    _write_session(app, "parent", "Parent", mtime=1_000)
+    # A newer session that forked from "parent" lists it as a prior id.
+    _write_session(app, "child", "Child", mtime=2_000, prior=["parent", None, 5])
+    got = desktop_app_sessions()
+    assert got["parent"]["title"] == "Parent"
+    assert got["child"]["title"] == "Child"

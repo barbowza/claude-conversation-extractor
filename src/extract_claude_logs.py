@@ -18,23 +18,38 @@ from typing import Dict, List, Optional, Tuple
 
 
 def desktop_app_sessions() -> Dict[str, dict]:
-    """Map CLI session id -> {title, archived} from the Claude desktop app, if installed."""
+    """Map CLI session id -> {title, archived} from the Claude desktop app, if installed.
+
+    A desktop session that was resumed lists its earlier transcripts in
+    priorCliSessionIds; those get the same title. A session's own
+    cliSessionId always beats a match through another session's prior ids.
+    """
     found: Dict[str, dict] = {}
-    newest: Dict[str, float] = {}
+    rank: Dict[str, Tuple[int, float]] = {}
     for f in _desktop_session_files():
         try:
             mtime = f.stat().st_mtime
             data = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        cli_id = data.get("cliSessionId") if isinstance(data, dict) else None
-        # The same session can appear under more than one install; keep the newest.
-        if cli_id and mtime >= newest.get(cli_id, float("-inf")):
-            newest[cli_id] = mtime
-            found[cli_id] = {
-                "title": data.get("title") or "",
-                "archived": bool(data.get("isArchived")),
-            }
+        if not isinstance(data, dict):
+            continue
+        entry = {
+            "title": data.get("title") or "",
+            "archived": bool(data.get("isArchived")),
+        }
+        prior = data.get("priorCliSessionIds")
+        candidates = [(data.get("cliSessionId"), 1)]
+        if isinstance(prior, list):
+            candidates += [(p, 0) for p in prior]
+        for cli_id, direct in candidates:
+            if not cli_id or not isinstance(cli_id, str):
+                continue
+            # The same session can appear under more than one install; keep the newest.
+            key = (direct, mtime)
+            if key >= rank.get(cli_id, (-1, float("-inf"))):
+                rank[cli_id] = key
+                found[cli_id] = entry
     return found
 
 
