@@ -18,27 +18,72 @@ from typing import Dict, List, Optional, Tuple
 
 
 def desktop_app_sessions() -> Dict[str, dict]:
-    """Map CLI session id -> {title, archived} from the Claude desktop app, if installed."""
+    """Map CLI session id -> {title, archived} from the Claude desktop app, if installed.
+
+    A desktop session that was resumed lists its earlier transcripts in
+    priorCliSessionIds; those get the same title. When several files name the
+    same id, a session's own cliSessionId beats a match through another
+    session's prior ids, then a titled entry beats an untitled one, then the
+    newest file wins (the same session can appear under more than one install).
+    """
     found: Dict[str, dict] = {}
-    roots = []
-    if os.environ.get("LOCALAPPDATA"):
-        roots.append(Path(os.environ["LOCALAPPDATA"]) / "Claude-Data")
-    roots.append(Path.home() / "Library" / "Application Support" / "Claude-Data")
-    for root in roots:
-        if not root.is_dir():
+    rank: Dict[str, Tuple[int, int, float]] = {}
+    for f in _desktop_session_files():
+        try:
+            mtime = f.stat().st_mtime
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             continue
-        for f in root.glob("*/claude-code-sessions/**/local_*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+        if not isinstance(data, dict):
+            continue
+        title = data.get("title") or ""
+        archived = bool(data.get("isArchived"))
+        prior = data.get("priorCliSessionIds")
+        candidates = [(data.get("cliSessionId"), 1)]
+        if isinstance(prior, list):
+            candidates += [(p, 0) for p in prior]
+        for cli_id, direct in candidates:
+            if not cli_id or not isinstance(cli_id, str):
                 continue
-            cli_id = data.get("cliSessionId") if isinstance(data, dict) else None
-            if cli_id:
-                found[cli_id] = {
-                    "title": data.get("title") or "",
-                    "archived": bool(data.get("isArchived")),
-                }
+            key = (direct, int(bool(title)), mtime)
+            if key >= rank.get(cli_id, (-1, -1, float("-inf"))):
+                rank[cli_id] = key
+                found[cli_id] = {"title": title, "archived": archived}
     return found
+
+
+def _desktop_session_files() -> List[Path]:
+    r"""Every local_*.json the Claude desktop app keeps for its Claude Code sessions.
+
+    The app stores them in <app data>/claude-code-sessions. Depending on the
+    install, <app data> is %APPDATA%\Claude (standard Windows installer),
+    %LOCALAPPDATA%\Claude-Data\<id> (packaged Windows install),
+    ~/Library/Application Support/Claude or .../Claude-Data/<id> (macOS),
+    or ~/.config/Claude (Linux).
+    """
+    app_dirs: List[Path] = []
+    if os.environ.get("APPDATA"):
+        app_dirs.append(Path(os.environ["APPDATA"]) / "Claude")
+    if os.environ.get("LOCALAPPDATA"):
+        app_dirs.extend(Path(os.environ["LOCALAPPDATA"]).glob("Claude-Data/*"))
+    mac = Path.home() / "Library" / "Application Support"
+    app_dirs.append(mac / "Claude")
+    app_dirs.extend(mac.glob("Claude-Data/*"))
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    app_dirs.append(Path(xdg) / "Claude")
+
+    files: List[Path] = []
+    seen = set()
+    for app_dir in app_dirs:
+        sessions = app_dir / "claude-code-sessions"
+        if not sessions.is_dir():
+            continue
+        for f in sessions.glob("**/local_*.json"):
+            key = os.path.normcase(str(f.resolve()))
+            if key not in seen:
+                seen.add(key)
+                files.append(f)
+    return files
 
 
 def _parse_timestamp(ts: str) -> Optional[datetime]:
