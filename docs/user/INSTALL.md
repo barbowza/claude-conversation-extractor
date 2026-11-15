@@ -211,7 +211,7 @@ claude-extract --list    # List all Claude Code conversations
 
 **Check Python version:**
 ```bash
-python3 --version  # Needs 3.8+ to export Claude Code logs
+python3 --version  # Needs 3.10+ to export Claude Code logs
 ```
 
 **Install newer Python:**
@@ -293,7 +293,7 @@ If you see your Claude conversations listed, the export tool is working!
 ## Still Can't Export Claude Code Conversations?
 
 1. **Check Claude Code is installed**: The tool exports from ~/.claude/projects
-2. **Verify Python 3.8+**: Run `python3 --version`
+2. **Verify Python 3.10+**: Run `python3 --version`
 3. **Try pipx**: Solves most installation issues
 4. **Report issues**: https://github.com/ZeroSumQuant/claude-conversation-extractor/issues
 
