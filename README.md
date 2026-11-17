@@ -54,6 +54,8 @@ This is the **ONLY tool that exports Claude Code conversations**:
 
 ## 📦 Install Claude Conversation Extractor
 
+> **From a clone of this repo:** to install the tool and a `claude-convos` command that starts the web UI and opens it in your browser (macOS, Linux, WSL, Windows), follow [docs/user/LAUNCHER.md](docs/user/LAUNCHER.md).
+
 ### Quick Install (Recommended)
 
 ```bash

@@ -1,0 +1,4 @@
+# Windows batch files need CRLF line endings.
+*.cmd text eol=crlf
+# The bash launcher must keep LF, or it breaks on macOS/Linux/WSL.
+scripts/launchers/claude-convos text eol=lf

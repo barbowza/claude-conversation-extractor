@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# claude-convos: run the Claude Conversation Extractor web UI (claude-web) in
+# the background and open it in the default browser. macOS, Linux and WSL.
+#
+#   claude-convos            start the server (or reuse it) and open the page
+#   claude-convos start      same
+#   claude-convos stop       stop the server
+#   claude-convos restart    stop, then start
+#   claude-convos status     show if the server runs
+#   claude-convos log        show the end of the server log
+#   claude-convos help       show this help
+#
+# Port: 8765. Override with CLAUDE_CONVOS_PORT.
+# CLAUDE_CONVOS_NO_BROWSER=1 skips opening the page (for tests).
+# Exit codes: 0 ok/running, 1 problem or port taken, 2 unknown command,
+# 3 not running (status only).
+#
+# Setup: docs/user/LAUNCHER.md. claude-web comes from `uv tool install .`.
+
+set -u
+
+PORT="${CLAUDE_CONVOS_PORT:-8765}"
+URL="http://localhost:$PORT/"
+CHECK_URL="http://127.0.0.1:$PORT/"   # the server listens on IPv4 only
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-convos"
+PID_FILE="$STATE_DIR/server.pid"
+LOG_FILE="$STATE_DIR/server.log"
+
+# Repo root, found through the symlink that puts this script on PATH.
+script_path() {
+  local p="${BASH_SOURCE[0]}" target
+  while [ -L "$p" ]; do
+    target="$(readlink "$p")"
+    case "$target" in
+      /*) p="$target" ;;
+      *)  p="$(dirname "$p")/$target" ;;
+    esac
+  done
+  printf '%s\n' "$p"
+}
+APP_DIR="$(cd "$(dirname "$(script_path)")/../.." 2>/dev/null && pwd)"
+
+find_server() {
+  local p
+  if p="$(command -v claude-web 2>/dev/null)"; then printf '%s\n' "$p"; return 0; fi
+  if command -v uv >/dev/null 2>&1; then
+    p="$(uv tool dir --bin 2>/dev/null)/claude-web"
+    if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+  fi
+  p="$HOME/.local/bin/claude-web"
+  if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+  return 1
+}
+
+is_up() {
+  curl -s -o /dev/null --max-time 2 "$CHECK_URL"
+}
+
+is_claude_web() {
+  ps -p "$1" -o command= 2>/dev/null | grep -q claude-web
+}
+
+# PIDs listening on PORT.
+listeners() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -t -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2
+  fi
+}
+
+port_in_use() {
+  [ -n "$(listeners)" ] || is_up
+}
+
+# PID of our server, or nothing.
+server_pid() {
+  local pid
+  if [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE")"
+    if kill -0 "$pid" 2>/dev/null && is_claude_web "$pid"; then
+      printf '%s\n' "$pid"; return 0
+    fi
+  fi
+  for pid in $(listeners); do
+    if is_claude_web "$pid"; then printf '%s\n' "$pid"; return 0; fi
+  done
+  return 1
+}
+
+open_page() {
+  [ -n "${CLAUDE_CONVOS_NO_BROWSER:-}" ] && return 0
+  if command -v open >/dev/null 2>&1 && [ "$(uname)" = Darwin ]; then
+    open "$URL"
+  elif command -v wslview >/dev/null 2>&1; then
+    wslview "$URL"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$URL" >/dev/null 2>&1
+  else
+    echo "Open $URL in your browser."
+  fi
+}
+
+start() {
+  local sp server pid _
+  if port_in_use; then
+    if ! sp="$(server_pid)"; then
+      echo "Port $PORT is in use by another program, not claude-web." >&2
+      echo "Stop that program, or pick another port: CLAUDE_CONVOS_PORT=8766 claude-convos" >&2
+      exit 1
+    fi
+    echo "Server already running at $URL (pid $sp)"
+    open_page
+    return 0
+  fi
+
+  if ! server="$(find_server)"; then
+    echo "Cannot find claude-web. Install it with:" >&2
+    echo "  cd \"$APP_DIR\" && uv tool install . --reinstall" >&2
+    exit 1
+  fi
+
+  mkdir -p "$STATE_DIR"
+  # Start from the state folder, never from an arbitrary current folder.
+  # exec makes the background subshell become the server, so $! is the server's PID
+  # and no shell keeps the caller's stdout open.
+  ( cd "$STATE_DIR" || exit 1
+    PYTHONUNBUFFERED=1 exec nohup "$server" --port "$PORT" --no-browser \
+      >"$LOG_FILE" 2>&1 </dev/null ) &
+  pid=$!
+  echo "$pid" >"$PID_FILE"
+
+  for _ in $(seq 1 50); do
+    if is_up; then
+      echo "Server started at $URL (pid $pid)"
+      open_page
+      return 0
+    fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  echo "Server did not start. Last log lines ($LOG_FILE):" >&2
+  tail -n 20 "$LOG_FILE" >&2
+  stop quiet
+  exit 1
+}
+
+stop() {
+  local quiet="${1:-}" pid _
+  if ! pid="$(server_pid)"; then
+    [ -z "$quiet" ] && echo "Server is not running."
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  kill "$pid" 2>/dev/null
+  for _ in $(seq 1 25); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  rm -f "$PID_FILE"
+  if server_pid >/dev/null; then echo "Could not stop server (pid $pid)." >&2; exit 1; fi
+  [ -z "$quiet" ] && echo "Server stopped (pid $pid)."
+  return 0
+}
+
+status() {
+  local sp
+  if sp="$(server_pid)"; then
+    if is_up; then echo "Running at $URL (pid $sp)"; return 0; fi
+    echo "Process $sp exists but $URL does not answer."; exit 1
+  fi
+  if port_in_use; then echo "Not running. Port $PORT is in use by another program."; exit 1; fi
+  echo "Not running."
+  exit 3
+}
+
+show_log() {
+  if [ -f "$LOG_FILE" ]; then echo "== $LOG_FILE"; tail -n 50 "$LOG_FILE"
+  else echo "No log yet ($LOG_FILE)."; fi
+}
+
+show_help() {
+  cat <<EOF
+claude-convos - Claude Conversation Extractor web UI ($URL)
+
+  claude-convos            start the server in the background and open the page
+  claude-convos start      same
+  claude-convos stop       stop the server
+  claude-convos restart    stop, then start
+  claude-convos status     show if the server runs
+  claude-convos log        show the end of the server log
+  claude-convos help       show this help
+
+Port: $PORT. Override with CLAUDE_CONVOS_PORT.
+State and log: $STATE_DIR
+Repo: $APP_DIR
+EOF
+}
+
+case "${1:-start}" in
+  start)   start ;;
+  stop)    stop ;;
+  restart) stop quiet; start ;;
+  status)  status ;;
+  log)     show_log ;;
+  help|-h|--help) show_help ;;
+  *) echo "Unknown command: $1" >&2; show_help; exit 2 ;;
+esac
