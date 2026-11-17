@@ -109,10 +109,18 @@ function Start-Server {
         exit 1
     }
     New-Item -ItemType Directory -Force $StateDir | Out-Null
-    $env:PYTHONUNBUFFERED = '1'   # so the log fills as the server writes
-    $proc = Start-Process -FilePath $exe -ArgumentList '--port', $Port, '--no-browser' `
-        -WorkingDirectory $StateDir -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $LogFile -RedirectStandardError $ErrFile
+    # Start through WMI, not Start-Process: Start-Process lets the server inherit this
+    # script's stdout handle, so `claude-convos | ...` (or any caller that captures output)
+    # would wait until the server stops. A WMI-created process inherits nothing.
+    # PYTHONUNBUFFERED (so the log fills as the server writes) is set inside cmd,
+    # because WMI does not pass our environment.
+    $cmdLine = "cmd.exe /d /c `"set PYTHONUNBUFFERED=1&& `"$exe`" --port $Port --no-browser > `"$LogFile`" 2> `"$ErrFile`"`""
+    $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = $cmdLine; CurrentDirectory = $StateDir; ProcessStartupInformation = $startup }
+    if ($r.ReturnValue -ne 0) { Write-Host "Could not start claude-web (Win32_Process.Create returned $($r.ReturnValue))."; exit 1 }
+    # The saved pid is cmd.exe; its command line contains claude-web, and taskkill /T ends the tree.
+    $proc = Get-Process -Id $r.ProcessId
     Set-Content -Path $PidFile -Value $proc.Id -NoNewline
 
     $deadline = (Get-Date).AddSeconds(10)
@@ -126,7 +134,7 @@ function Start-Server {
         Start-Sleep -Milliseconds 300
     }
     Write-Host "Server did not start. Last log lines:"
-    foreach ($f in $LogFile, $ErrFile) { if (Test-Path $f) { Get-Content $f -Tail 20 } }
+    foreach ($f in $LogFile, $ErrFile) { if (Test-Path $f) { Get-Content $f -Tail 20 -Encoding UTF8 } }
     Stop-Server -Quiet
     exit 1
 }
@@ -159,7 +167,7 @@ function Show-Status {
 function Show-Log {
     $found = $false
     foreach ($f in $LogFile, $ErrFile) {
-        if (Test-Path $f) { $found = $true; Write-Host "== $f"; Get-Content $f -Tail 50 }
+        if (Test-Path $f) { $found = $true; Write-Host "== $f"; Get-Content $f -Tail 50 -Encoding UTF8 }
     }
     if (-not $found) { Write-Host "No log yet ($LogFile)." }
 }

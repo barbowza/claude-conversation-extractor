@@ -72,9 +72,9 @@ Run every command from the root of the clone.
 5. **Test without opening the browser.**
 
    ```bash
-   claude-convos status                            # "Not running.", exit 3
-   CLAUDE_CONVOS_NO_BROWSER=1 claude-convos        # "Server started at ..."
-   claude-convos status                            # "Running at ...", exit 0
+   claude-convos status; echo $?                   # "Not running.", 3
+   CLAUDE_CONVOS_NO_BROWSER=1 claude-convos | cat  # "Server started at ...". Must return, not hang.
+   claude-convos status; echo $?                   # "Running at ...", 0
    CLAUDE_CONVOS_NO_BROWSER=1 claude-convos        # "Server already running ..."
    claude-convos stop                              # "Server stopped ..."
    ```
@@ -131,15 +131,21 @@ Run every command in PowerShell from the root of the clone.
 
    ```powershell
    $env:CLAUDE_CONVOS_NO_BROWSER = '1'
-   claude-convos status     # "Not running.", exit 3
-   claude-convos            # "Server started at ..."
-   claude-convos status     # "Running at ...", exit 0
-   claude-convos            # "Server already running ..."
-   claude-convos stop       # "Server stopped ..."
+   claude-convos status; $LASTEXITCODE    # "Not running.", 3
+   claude-convos | Out-String             # "Server started at ...". Must return, not hang.
+   claude-convos status; $LASTEXITCODE    # "Running at ...", 0
+   claude-convos                          # "Server already running ..."
+   claude-convos stop                     # "Server stopped ..."
    Remove-Item Env:CLAUDE_CONVOS_NO_BROWSER
    ```
 
-   Also run `claude-convos status` from `cmd.exe` once, to check the shim.
+   Also check the shim from `cmd.exe`. Type the two commands on separate lines: on one
+   line joined with `&`, `%ERRORLEVEL%` expands too early and shows `0`.
+
+   ```bat
+   claude-convos status
+   echo %ERRORLEVEL%
+   ```
 
 6. **Real run.** Type `claude-convos`. The page opens in the default browser.
 
@@ -164,5 +170,11 @@ reinstall fails.
   the child owns the socket. So the script checks the parent process too, and `stop` uses
   `taskkill /T` to end the whole tree.
 - The server starts with the state folder as its working folder, not the folder you are in.
+- The server must not keep the caller's output open, or `claude-convos | ...` (and any AI
+  tool that reads the output) waits until the server stops. Bash: the background subshell
+  `exec`s the server with all three streams redirected. Windows: the server starts through
+  WMI (`Win32_Process.Create`), because `Start-Process` lets it inherit the output handle.
+- Windows PowerShell 5.1 reads the UTF-8 log as ANSI unless told, so `log` uses
+  `Get-Content -Encoding UTF8`.
 - If port 8765 is taken by another program, the launcher stops with an error. It never
   kills a process that is not `claude-web`.
